@@ -188,11 +188,11 @@ class PayrollService(BaseService):
         ] if json_ext else []
 
         base_beneficiary_queryset = Beneficiary.objects.all()
-        if payment_plan.benefit_plan.type == BenefitPlan.BenefitPlanType.GROUP_TYPE:
+        if payment_plan.benefit_plan and payment_plan.benefit_plan.type == BenefitPlan.BenefitPlanType.GROUP_TYPE:
             base_beneficiary_queryset = GroupBeneficiary.objects.all()
 
         beneficiaries_queryset = base_beneficiary_queryset.filter(
-            benefit_plan__id=payment_plan.benefit_plan.id,
+            benefit_plan__id=payment_plan.benefit_plan.id if payment_plan.benefit_plan else None,
             status=BeneficiaryStatus.ACTIVE,
             is_deleted=False,
         )
