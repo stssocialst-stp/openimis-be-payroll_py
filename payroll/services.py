@@ -210,11 +210,7 @@ class PayrollService(BaseService):
     def _generate_benefits(self, payment_plan, beneficiaries_queryset, date_from, date_to, payroll, payment_cycle):
         calculation = get_calculation_object(payment_plan.calculation)
         if calculation is None:
-            raise ValueError(
-                f"No active calculation rule found for PaymentPlan '{payment_plan.id}' "
-                f"(calculation='{payment_plan.calculation}'). "
-                f"Please configure a valid calculation rule for this payment plan."
-            )
+            return
         calculation.calculate_if_active_for_object(
             payment_plan,
             user_id=self.user.id,
