@@ -51,7 +51,13 @@ DEFAULT_CONFIG = {
     "payment_gateway_timeout": 5,
     "payment_gateway_auth_type": "basic",  # can be 'token' or 'basic'
     "payment_gateway_class": "payroll.payment_gateway.MockedPaymentGatewayConnector",
-    "receipt_length": 8
+    "receipt_length": 8,
+
+    # BISTP / xcore (Banco Mundial) — lidos directamente de os.environ no connector
+    "bistp_base_url": os.getenv('BISTP_BASE_URL', 'https://172.16.22.32'),
+    "bistp_api_base_path": os.getenv('BISTP_API_BASE_PATH', '/cxf/banco-mundial'),
+    "bistp_ssl_verify": os.getenv('BISTP_SSL_VERIFY', 'False'),
+    "bistp_timeout": int(os.getenv('BISTP_TIMEOUT', '10')),
 }
 
 
@@ -120,10 +126,12 @@ class PayrollConfig(AppConfig):
             StrategyOfflinePayment,
             StrategyOnlinePayment
         )
+        from payroll.strategies.strategy_bistp_payment import StrategyBistpPayment
         PaymentsMethodRegistryPoint.register_payment_method(
             payment_method_class_list=[
                 StrategyOfflinePayment(),
                 StrategyOnlinePayment(),
+                StrategyBistpPayment(),
             ]
         )
 

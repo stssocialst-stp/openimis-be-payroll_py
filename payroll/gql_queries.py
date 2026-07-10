@@ -89,10 +89,20 @@ class BenefitConsumptionGQLType(DjangoObjectType):
         )
 
 
+class BistpPayrollSummaryGQLType(graphene.ObjectType):
+    reconciled  = graphene.Int()
+    rejected    = graphene.Int()
+    pending     = graphene.Int()
+    skipped_nib = graphene.Int()
+    send_failed = graphene.Int()
+    total       = graphene.Int()
+
+
 class PayrollGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     benefit_consumption = graphene.List(BenefitConsumptionGQLType)
     benefit_plan_name_code = graphene.String()
+    bistp_summary = graphene.Field(BistpPayrollSummaryGQLType)
 
     class Meta:
         model = Payroll
@@ -123,6 +133,20 @@ class PayrollGQLType(DjangoObjectType):
     def resolve_benefit_plan_name_code(self, info):
         benefit_plan = BenefitPlan.objects.get(id=self.payment_plan.benefit_plan.id, is_deleted=False)
         return f"{benefit_plan.code} - {benefit_plan.name}"
+
+    def resolve_bistp_summary(self, info):
+        qs = BenefitConsumption.objects.filter(
+            payrollbenefitconsumption__payroll_id=self.id,
+            is_deleted=False,
+        )
+        return BistpPayrollSummaryGQLType(
+            reconciled  = qs.filter(status='RECONCILED').count(),
+            rejected    = qs.filter(status='REJECTED').count(),
+            pending     = qs.filter(status='APPROVE_FOR_PAYMENT').count(),
+            skipped_nib = qs.filter(status='ACCEPTED', json_ext__bistp_skip_reason='nib_ausente').count(),
+            send_failed = qs.filter(status='ACCEPTED', json_ext__bistp_skip_reason='envio_falhou').count(),
+            total       = qs.count(),
+        )
 
 
 class PaymentMethodGQLType(graphene.ObjectType):
