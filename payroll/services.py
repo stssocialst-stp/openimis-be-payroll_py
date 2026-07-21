@@ -92,7 +92,6 @@ class PayrollService(BaseService):
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)
 
     @check_authentication
-    @register_service_signal('payroll_service.create')
     def create_async(self, obj_data):
         """
         Saves the payroll header immediately and dispatches benefit generation to Celery.
