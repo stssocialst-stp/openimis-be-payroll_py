@@ -9,6 +9,24 @@ from payroll.payments_registry import PaymentMethodStorage
 logger = logging.getLogger(__name__)
 
 
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def generate_payroll_benefits_task(self, payroll_id, user_id):
+    """
+    Generates benefits for a payroll asynchronously.
+    Called after the payroll header is saved so the HTTP request returns immediately.
+    """
+    try:
+        from payroll.services import PayrollService
+        payroll = Payroll.objects.get(id=payroll_id)
+        user = User.objects.get(id=user_id)
+        service = PayrollService(user)
+        service._finalize_payroll_async(payroll)
+        logger.info(f"[Payroll] Benefits generated for payroll {payroll_id}")
+    except Exception as exc:
+        logger.error(f"[Payroll] generate_payroll_benefits_task failed for {payroll_id}: {exc}")
+        raise self.retry(exc=exc)
+
+
 @shared_task
 def send_requests_to_gateway_payment(payroll_id, user_id):
     payroll = Payroll.objects.get(id=payroll_id)

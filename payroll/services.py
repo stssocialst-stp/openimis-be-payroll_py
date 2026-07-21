@@ -91,6 +91,59 @@ class PayrollService(BaseService):
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)
 
+    @check_authentication
+    @register_service_signal('payroll_service.create')
+    def create_async(self, obj_data):
+        """
+        Saves the payroll header immediately and dispatches benefit generation to Celery.
+        The HTTP request returns in milliseconds; benefits are generated in the background.
+        """
+        try:
+            obj_data = self._adjust_create_payload(obj_data)
+            from_failed_invoices_payroll_id = obj_data.pop("from_failed_invoices_payroll_id", None)
+
+            with transaction.atomic():
+                payroll, dict_representation = self._save_payroll(obj_data)
+
+            if not bool(from_failed_invoices_payroll_id):
+                from payroll.tasks import generate_payroll_benefits_task
+                generate_payroll_benefits_task.delay(str(payroll.id), str(self.user.id))
+            else:
+                with transaction.atomic():
+                    self._move_benefit_consumptions(payroll, from_failed_invoices_payroll_id)
+                self.create_accept_payroll_task(payroll.id, obj_data)
+
+            return dict_representation
+        except Exception as exc:
+            return output_exception(model_name=self.OBJECT_TYPE.__name__, method="create", exception=exc)
+
+    def _finalize_payroll_async(self, payroll):
+        """
+        Called from Celery. Generates benefits from the already-saved payroll header
+        and creates the approval task. All context is reconstructed from the payroll record.
+        """
+        try:
+            obj_data = {'json_ext': payroll.json_ext}
+            payment_plan = payroll.payment_plan
+            payment_cycle = payroll.payment_cycle
+            date_valid_from = payroll.date_valid_from
+            date_valid_to = payroll.date_valid_to
+
+            beneficiaries_queryset = self._select_beneficiary_based_on_criteria(obj_data, payment_plan)
+            with transaction.atomic():
+                self._generate_benefits(
+                    payment_plan,
+                    beneficiaries_queryset,
+                    date_valid_from,
+                    date_valid_to,
+                    payroll,
+                    payment_cycle,
+                )
+                self.create_accept_payroll_task(payroll.id, obj_data)
+        except Exception as exc:
+            logger.error(f"[Payroll] _finalize_payroll_async failed for payroll {payroll.id}: {exc}")
+            raise
+
     @register_service_signal('payroll_service.update')
     def update(self, obj_data):
         raise NotImplementedError()
