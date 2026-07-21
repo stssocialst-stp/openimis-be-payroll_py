@@ -1,5 +1,5 @@
 import graphene
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Count, Case, When, IntegerField
 from graphene_django import DjangoObjectType
 
 from core import prefix_filterset, ExtendedConnection
@@ -83,10 +83,10 @@ class BenefitConsumptionGQLType(DjangoObjectType):
         connection_class = ExtendedConnection
 
     def resolve_benefit_attachment(self, info):
-        return BenefitAttachment.objects.filter(
-            benefit_id=self.id,
-            is_deleted=False
-        )
+        # Use prefetch cache when available (set by PayrollGQLType.resolve_benefit_consumption)
+        if hasattr(self, '_prefetched_objects_cache') and 'benefitattachment_set' in self._prefetched_objects_cache:
+            return [a for a in self.benefitattachment_set.all() if not a.is_deleted]
+        return BenefitAttachment.objects.filter(benefit_id=self.id, is_deleted=False)
 
 
 class BistpPayrollSummaryGQLType(graphene.ObjectType):
@@ -126,27 +126,41 @@ class PayrollGQLType(DjangoObjectType):
         connection_class = ExtendedConnection
 
     def resolve_benefit_consumption(self, info):
-        return BenefitConsumption.objects.filter(payrollbenefitconsumption__payroll__id=self.id,
-                                                 is_deleted=False,
-                                                 payrollbenefitconsumption__is_deleted=False)
+        return (
+            BenefitConsumption.objects
+            .filter(
+                payrollbenefitconsumption__payroll__id=self.id,
+                is_deleted=False,
+                payrollbenefitconsumption__is_deleted=False,
+            )
+            .select_related('individual')
+            .prefetch_related('benefitattachment_set__bill')
+        )
 
     def resolve_benefit_plan_name_code(self, info):
         benefit_plan = BenefitPlan.objects.get(id=self.payment_plan.benefit_plan.id, is_deleted=False)
         return f"{benefit_plan.code} - {benefit_plan.name}"
 
     def resolve_bistp_summary(self, info):
-        qs = BenefitConsumption.objects.filter(
+        # Single query with conditional aggregation instead of 6 separate COUNTs
+        agg = BenefitConsumption.objects.filter(
             payrollbenefitconsumption__payroll_id=self.id,
             is_deleted=False,
+        ).aggregate(
+            reconciled=Count(Case(When(status='RECONCILED', then=1), output_field=IntegerField())),
+            rejected=Count(Case(When(status='REJECTED', then=1), output_field=IntegerField())),
+            pending=Count(Case(When(status='APPROVE_FOR_PAYMENT', then=1), output_field=IntegerField())),
+            skipped_nib=Count(Case(
+                When(status='ACCEPTED', json_ext__bistp_skip_reason='nib_ausente', then=1),
+                output_field=IntegerField(),
+            )),
+            send_failed=Count(Case(
+                When(status='ACCEPTED', json_ext__bistp_skip_reason='envio_falhou', then=1),
+                output_field=IntegerField(),
+            )),
+            total=Count('id'),
         )
-        return BistpPayrollSummaryGQLType(
-            reconciled  = qs.filter(status='RECONCILED').count(),
-            rejected    = qs.filter(status='REJECTED').count(),
-            pending     = qs.filter(status='APPROVE_FOR_PAYMENT').count(),
-            skipped_nib = qs.filter(status='ACCEPTED', json_ext__bistp_skip_reason='nib_ausente').count(),
-            send_failed = qs.filter(status='ACCEPTED', json_ext__bistp_skip_reason='envio_falhou').count(),
-            total       = qs.count(),
-        )
+        return BistpPayrollSummaryGQLType(**agg)
 
 
 class PaymentMethodGQLType(graphene.ObjectType):

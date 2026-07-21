@@ -194,7 +194,12 @@ class Query(graphene.ObjectType):
             wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
-        query = Payroll.objects.filter(*filters)
+        query = Payroll.objects.filter(*filters).select_related(
+            'payment_plan__benefit_plan',
+            'payment_cycle',
+            'payment_point__location__parent__parent__parent',
+            'payment_point__ppm__i_user',
+        )
         return gql_optimizer.query(query, info)
 
     def resolve_payroll_benefit_consumption(self, info, **kwargs):
