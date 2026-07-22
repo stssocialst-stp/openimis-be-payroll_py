@@ -195,7 +195,7 @@ class Query(graphene.ObjectType):
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         query = Payroll.objects.filter(*filters).select_related(
-            'payment_plan__benefit_plan',
+            'payment_plan__benefit_plan_type',
             'payment_cycle',
             'payment_point__location__parent__parent__parent',
             'payment_point__ppm__i_user',
