@@ -2,7 +2,7 @@ import logging
 
 from django.db import transaction
 from rest_framework import views
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -44,6 +44,7 @@ def send_callback_to_openimis(request):
 
 
 @api_view(["POST"])
+@authentication_classes([])
 @permission_classes([AllowAny])
 @bistp_callback_auth
 def bistp_payment_status_callback(request):
