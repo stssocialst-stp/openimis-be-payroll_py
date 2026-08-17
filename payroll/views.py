@@ -81,6 +81,8 @@ def bistp_payment_status_callback(request):
                 json_ext['bistp_rejection_reason'] = item.get('reason', '')
                 logger.warning("[BISTP][Callback] Pagamento rejeitado: payroll=%s individual=%s motivo=%s",
                                payroll_id, household_id, item.get('reason'))
+            json_ext['bistp_nib_number'] = item.get('nib_number', '')
+            json_ext['bistp_processed_datetime'] = item.get('processed_datetime', '')
             json_ext['bistp_processed'] = True
             benefit.json_ext = json_ext
             benefit.save(username='bistp_callback')
@@ -89,6 +91,24 @@ def bistp_payment_status_callback(request):
                              payroll_id, household_id)
 
     return Response({"status": "success", "message": "Payment statuses received successfully"})
+
+
+@api_view(["GET"])
+@permission_classes([check_user_rights(PayrollConfig.gql_bistp_account_info_perms)])
+def bistp_account_info(request):
+    nib = request.GET.get('nib')
+    if not nib:
+        return Response({"status": "error", "message": "Parâmetro 'nib' obrigatório"}, status=400)
+    try:
+        from payroll.payment_gateway.bistp_gateway_connector import BistpGatewayConnector
+        connector = BistpGatewayConnector()
+        data = connector.get_account_info(nib)
+        if data is None:
+            return Response({"status": "error", "message": "Sem resposta do banco"}, status=502)
+        return Response(data)
+    except Exception as exc:
+        logger.exception("[BISTP][AccountInfo] Erro ao consultar NIB=%s", nib)
+        return Response({"status": "error", "message": str(exc)}, status=500)
 
 
 def _resolve_send_callback_to_imis_args(request):

@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "gql_payroll_delete_perms": ["202004"],
     "gql_csv_reconciliation_search_perms": ["206001"],
     "gql_csv_reconciliation_create_perms": ["206002"],
+    "gql_bistp_account_info_perms": ["207001"],
     "payroll_accept_event": "payroll.accept_payroll",
     "payroll_reconciliation_event": "payroll.payroll_reconciliation",
     "payroll_reject_event": "payroll.payroll_reject",
@@ -74,6 +75,7 @@ class PayrollConfig(AppConfig):
     gql_payroll_delete_perms = None
     gql_csv_reconciliation_search_perms = None
     gql_csv_reconciliation_create_perms = None
+    gql_bistp_account_info_perms = None
     payroll_accept_event = None
     payroll_reconciliation_event = None
     payroll_reject_event = None
