@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 from payroll.models import BenefitConsumptionStatus, PayrollStatus
 from payroll.payment_gateway.bistp_gateway_connector import BistpGatewayConnector
@@ -31,83 +32,53 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
         benefits = StrategyOnlinePayment.get_benefits_attached_to_payroll(
             payroll, BenefitConsumptionStatus.ACCEPTED
         )
-        total_benefits = len(list(benefits)) if hasattr(benefits, '__len__') else '?'
-        logger.info("[BISTP][Strategy] Payroll %s — total de benefícios ACCEPTED a processar: %s",
-                    payroll.id, total_benefits)
 
-        # Re-fetch after len() consumed the queryset if it's a list
-        benefits = StrategyOnlinePayment.get_benefits_attached_to_payroll(
-            payroll, BenefitConsumptionStatus.ACCEPTED
-        )
-
-        approved = []
+        batch_payments = []
+        approved_benefits = []
         sem_nib = 0
-        falhou = 0
-        processados = 0
 
         for benefit in benefits:
-            processados += 1
             nib = getattr(benefit.individual, 'nib', None)
-
             if not nib:
                 sem_nib += 1
-                logger.warning(
-                    "[BISTP][Strategy] [%d] Benefício %s — individual %s SEM NIB — a ignorar",
-                    processados, benefit.code, benefit.individual_id
-                )
+                logger.warning("[BISTP][Strategy] Benefício %s — individual %s SEM NIB — a ignorar",
+                               benefit.code, benefit.individual_id)
                 json_ext = benefit.json_ext or {}
                 json_ext['bistp_skip_reason'] = 'nib_ausente'
                 benefit.json_ext = json_ext
                 benefit.save(username='bistp')
                 continue
 
-            nib_masked = f"{nib[:4]}***{nib[-2:]}" if len(nib) > 6 else nib
-            logger.info(
-                "[BISTP][Strategy] [%d] Benefício %s — individual %s, NIB=%s, amount=%s — a enviar",
-                processados, benefit.code, benefit.individual_id, nib_masked, benefit.amount
-            )
+            batch_payments.append({
+                "household_id": str(benefit.individual_id),
+                "nib_number": nib,
+                "amount": str(benefit.amount),
+                "payment_date": date.today().isoformat(),
+                "programme_name": "Cash Distribution",
+            })
+            approved_benefits.append(benefit)
 
-            ok = cls.PAYMENT_GATEWAY.send_payment(
-                invoice_id=benefit.code,
-                amount=str(benefit.amount),
-                nib=nib,
-                household_id=str(benefit.individual_id),
-            )
+        logger.info("[BISTP][Strategy] Payroll %s — válidos=%d, sem NIB=%d",
+                    payroll.id, len(approved_benefits), sem_nib)
 
-            if ok:
-                logger.info(
-                    "[BISTP][Strategy] [%d] Benefício %s → ENVIADO COM SUCESSO",
-                    processados, benefit.code
-                )
-                approved.append(benefit)
-            else:
-                falhou += 1
-                logger.error(
-                    "[BISTP][Strategy] [%d] Benefício %s → FALHOU envio — mantido em ACCEPTED",
-                    processados, benefit.code
-                )
+        if not batch_payments:
+            logger.warning("[BISTP][Strategy] Payroll %s — sem pagamentos válidos para enviar", payroll.id)
+            return
+
+        ok = cls.PAYMENT_GATEWAY.send_payment_batch(str(payroll.id), batch_payments)
+
+        if ok:
+            StrategyOnlinePayment.approve_for_payment_benefit_consumption(approved_benefits, user)
+            logger.info("[BISTP][Strategy] ====== FIM — Payroll %s — batch aceite, %d → APPROVE_FOR_PAYMENT ======",
+                        payroll.id, len(approved_benefits))
+        else:
+            for benefit in approved_benefits:
                 json_ext = benefit.json_ext or {}
-                json_ext['bistp_skip_reason'] = 'envio_falhou'
+                json_ext['bistp_skip_reason'] = 'batch_falhou'
                 benefit.json_ext = json_ext
                 benefit.save(username='bistp')
-
-        StrategyOnlinePayment.approve_for_payment_benefit_consumption(approved, user)
-
-        logger.info(
-            "[BISTP][Strategy] ====== FIM DE PAGAMENTO — Payroll %s ======\n"
-            "  Total processados : %d\n"
-            "  Enviados OK       : %d\n"
-            "  Sem NIB           : %d\n"
-            "  Falhou envio      : %d",
-            payroll.id, processados, len(approved), sem_nib, falhou
-        )
-
-        if falhou > 0:
-            logger.warning(
-                "[BISTP][Strategy] Payroll %s — %d benefício(s) falharam. "
-                "Verificar logs [BISTP][Payment] acima para detalhe por invoice.",
-                payroll.id, falhou
-            )
+            logger.error("[BISTP][Strategy] ====== FIM — Payroll %s — batch rejeitado, %d mantidos em ACCEPTED ======",
+                         payroll.id, len(approved_benefits))
 
     @classmethod
     def reconcile_payroll(cls, payroll, user):

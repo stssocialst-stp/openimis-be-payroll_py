@@ -99,6 +99,63 @@ class BistpGatewayConnector(PaymentGatewayConnector):
         logger.error("[BISTP][Payment] invoice=%s → FALHOU após 3 tentativas", invoice_id)
         return False
 
+    def send_payment_batch(self, batch_id, payments):
+        url = f"{self._base_url}{self._api_path}/api/payments/initiate"
+        payload = {
+            "transaction_id": str(batch_id),
+            "payments": payments,
+        }
+        logger.info("[BISTP][Batch] Iniciando batch — batch_id=%s, total=%d pagamentos", batch_id, len(payments))
+
+        for attempt in range(3):
+            try:
+                t0 = time.time()
+                response = requests.post(
+                    url,
+                    json=payload,
+                    headers=self._auth_headers(),
+                    verify=self._ssl_verify,
+                    timeout=self._timeout,
+                )
+                elapsed = time.time() - t0
+                logger.info("[BISTP][Batch] batch_id=%s → HTTP %s (%.3fs, tentativa %d/3)",
+                            batch_id, response.status_code, elapsed, attempt + 1)
+
+                if response.status_code == 200:
+                    body = response.json()
+                    success = body.get('status') == 'success'
+                    if not success:
+                        logger.warning("[BISTP][Batch] batch_id=%s aceite mas status='%s'",
+                                       batch_id, body.get('status'))
+                    return success
+
+                if response.status_code == 401:
+                    logger.warning("[BISTP][Batch] batch_id=%s → 401 — a invalidar token e retry", batch_id)
+                    self._token_manager.invalidate()
+                    continue
+
+                if response.status_code < 500:
+                    logger.error("[BISTP][Batch] batch_id=%s → HTTP %s (sem retry) body=%s",
+                                 batch_id, response.status_code, response.text[:300])
+                    return False
+
+                logger.warning("[BISTP][Batch] batch_id=%s → HTTP %s (tentativa %d/3)",
+                               batch_id, response.status_code, attempt + 1)
+
+            except requests.Timeout:
+                logger.warning("[BISTP][Batch] batch_id=%s → Timeout (tentativa %d/3)", batch_id, attempt + 1)
+            except requests.ConnectionError as exc:
+                logger.error("[BISTP][Batch] batch_id=%s → Erro de ligação: %s", batch_id, exc)
+                return False
+            except Exception:
+                logger.exception("[BISTP][Batch] batch_id=%s → Erro inesperado", batch_id)
+                return False
+
+            time.sleep(2 ** attempt)
+
+        logger.error("[BISTP][Batch] batch_id=%s → FALHOU após 3 tentativas", batch_id)
+        return False
+
     def get_account_info(self, nib):
         url = f"{self._base_url}{self._api_path}/api/accounts/info"
         nib_masked = f"{nib[:4]}***{nib[-2:]}" if nib and len(nib) > 6 else nib

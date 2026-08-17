@@ -48,17 +48,25 @@ def send_callback_to_openimis(request):
 @permission_classes([AllowAny])
 @bistp_callback_auth
 def bistp_payment_status_callback(request):
-    transaction_id = request.data.get('transaction_id')
+    payroll_id = request.data.get('transaction_id')
     payment_statuses = request.data.get('payment_statuses', [])
 
-    logger.info(
-        "BISTP callback recebido: transaction_id=%s, %d items", transaction_id, len(payment_statuses)
-    )
+    logger.info("BISTP callback recebido: payroll_id=%s, %d items", payroll_id, len(payment_statuses))
 
     for item in payment_statuses:
+        household_id = item.get('household_id')
+        if not household_id:
+            logger.warning("[BISTP][Callback] Item sem household_id — ignorado")
+            continue
         try:
-            benefit = BenefitConsumption.objects.filter(code=transaction_id).first()
+            benefit = BenefitConsumption.objects.filter(
+                individual_id=household_id,
+                payrollbenefitconsumption__payroll_id=payroll_id,
+                is_deleted=False,
+            ).first()
             if not benefit:
+                logger.warning("[BISTP][Callback] Benefício não encontrado: payroll=%s individual=%s",
+                               payroll_id, household_id)
                 continue
             json_ext = benefit.json_ext or {}
             if json_ext.get('bistp_processed'):
@@ -66,20 +74,19 @@ def bistp_payment_status_callback(request):
             if item.get('status') == 'success':
                 benefit.status = BenefitConsumptionStatus.RECONCILED
                 benefit.receipt = item.get('transaction_reference', '')
-                logger.info(
-                    "BISTP benefit %s reconciliado: ref=%s", transaction_id, item.get('transaction_reference')
-                )
+                logger.info("[BISTP][Callback] Benefício reconciliado: payroll=%s individual=%s ref=%s",
+                            payroll_id, household_id, item.get('transaction_reference'))
             else:
                 benefit.status = BenefitConsumptionStatus.REJECTED
                 json_ext['bistp_rejection_reason'] = item.get('reason', '')
-                logger.warning(
-                    "BISTP pagamento rejeitado: %s — %s", transaction_id, item.get('reason')
-                )
+                logger.warning("[BISTP][Callback] Pagamento rejeitado: payroll=%s individual=%s motivo=%s",
+                               payroll_id, household_id, item.get('reason'))
             json_ext['bistp_processed'] = True
             benefit.json_ext = json_ext
             benefit.save(username='bistp_callback')
         except Exception:
-            logger.exception("Erro a processar callback BISTP para %s", transaction_id)
+            logger.exception("[BISTP][Callback] Erro a processar item: payroll=%s individual=%s",
+                             payroll_id, household_id)
 
     return Response({"status": "success", "message": "Payment statuses received successfully"})
 
