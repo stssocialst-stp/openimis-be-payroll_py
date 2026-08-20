@@ -46,7 +46,7 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
                 json_ext = benefit.json_ext or {}
                 json_ext['bistp_skip_reason'] = 'nib_ausente'
                 benefit.json_ext = json_ext
-                benefit.save(username='bistp')
+                benefit.save(username=user.username)
                 continue
 
             batch_payments.append({
@@ -76,7 +76,7 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
                 json_ext = benefit.json_ext or {}
                 json_ext['bistp_skip_reason'] = 'batch_falhou'
                 benefit.json_ext = json_ext
-                benefit.save(username='bistp')
+                benefit.save(username=user.username)
             logger.error("[BISTP][Strategy] ====== FIM — Payroll %s — batch rejeitado, %d mantidos em ACCEPTED ======",
                          payroll.id, len(approved_benefits))
 

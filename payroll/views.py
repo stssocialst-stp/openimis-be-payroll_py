@@ -43,6 +43,12 @@ def send_callback_to_openimis(request):
         return Response({'success': False, 'error': str(exc)}, status=500)
 
 
+def _bistp_service_username():
+    from core.models import User as CoreUser
+    su = CoreUser.objects.filter(is_superuser=True).values_list('username', flat=True).first()
+    return su or 'admin'
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
@@ -85,7 +91,7 @@ def bistp_payment_status_callback(request):
             json_ext['bistp_processed_datetime'] = item.get('processed_datetime', '')
             json_ext['bistp_processed'] = True
             benefit.json_ext = json_ext
-            benefit.save(username='bistp_callback')
+            benefit.save(username=_bistp_service_username())
         except Exception:
             logger.exception("[BISTP][Callback] Erro a processar item: payroll=%s individual=%s",
                              payroll_id, household_id)
