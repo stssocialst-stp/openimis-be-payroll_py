@@ -38,7 +38,12 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
         sem_nib = 0
 
         for benefit in benefits:
-            nib = getattr(benefit.individual, 'nib', None)
+            ind_json = benefit.individual.json_ext or {} if benefit.individual else {}
+            nib = (
+                ind_json.get('NIB') or
+                ind_json.get('nib') or
+                getattr(benefit.individual, 'nib', None)
+            )
             if not nib:
                 sem_nib += 1
                 logger.warning("[BISTP][Strategy] Benefício %s — individual %s SEM NIB — a ignorar",
