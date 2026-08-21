@@ -26,7 +26,9 @@ class BistpTokenManager:
         return self._fetch_token()
 
     def _fetch_token(self):
-        base_url = os.environ['BISTP_BASE_URL']
+        _raw_base = os.environ['BISTP_BASE_URL'].rstrip('/')
+        _port = os.environ.get('BISTP_PORT', '').strip()
+        base_url = f"{_raw_base}:{_port}" if _port else _raw_base
         endpoint = os.environ['BISTP_TOKEN_ENDPOINT']
         ssl_verify = os.environ.get('BISTP_SSL_VERIFY', 'False').strip().lower() not in ('false', '0', '')
         timeout = int(os.environ.get('BISTP_TIMEOUT', '10'))
