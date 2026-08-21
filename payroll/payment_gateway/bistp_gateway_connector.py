@@ -15,7 +15,9 @@ class BistpGatewayConnector(PaymentGatewayConnector):
 
     def __init__(self):
         self._token_manager = BistpTokenManager()
-        self._base_url = os.environ['BISTP_BASE_URL']
+        base_url = os.environ['BISTP_BASE_URL'].rstrip('/')
+        port = os.environ.get('BISTP_PORT', '').strip()
+        self._base_url = f"{base_url}:{port}" if port else base_url
         self._api_path = os.environ.get('BISTP_API_BASE_PATH', '/cxf/banco-mundial')
         self._ssl_verify = os.environ.get('BISTP_SSL_VERIFY', 'False').strip().lower() not in ('false', '0', '')
         self._timeout = int(os.environ.get('BISTP_TIMEOUT', '10'))

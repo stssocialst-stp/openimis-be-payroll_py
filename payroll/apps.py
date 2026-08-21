@@ -56,6 +56,7 @@ DEFAULT_CONFIG = {
 
     # BISTP / xcore (Banco Mundial) — lidos directamente de os.environ no connector
     "bistp_base_url": os.getenv('BISTP_BASE_URL', 'https://172.16.22.32'),
+    "bistp_port": os.getenv('BISTP_PORT', '8443'),
     "bistp_api_base_path": os.getenv('BISTP_API_BASE_PATH', '/cxf/banco-mundial'),
     "bistp_ssl_verify": os.getenv('BISTP_SSL_VERIFY', 'False'),
     "bistp_timeout": int(os.getenv('BISTP_TIMEOUT', '10')),
