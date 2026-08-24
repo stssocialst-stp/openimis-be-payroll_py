@@ -101,14 +101,27 @@ class BistpGatewayConnector(PaymentGatewayConnector):
         logger.error("[BISTP][Payment] invoice=%s → FALHOU após 3 tentativas", invoice_id)
         return False
 
+    BATCH_SIZE = 100
+
     def send_payment_batch(self, batch_id, payments):
         url = f"{self._base_url}{self._api_path}/api/payments/initiate"
-        payload = {
-            "transaction_id": str(batch_id),
-            "payments": payments,
-        }
-        logger.info("[BISTP][Batch] Iniciando batch — batch_id=%s, total=%d pagamentos", batch_id, len(payments))
+        total = len(payments)
+        logger.info("[BISTP][Batch] Iniciando batch — batch_id=%s, total=%d pagamentos, chunks=%d",
+                    batch_id, total, (total + self.BATCH_SIZE - 1) // self.BATCH_SIZE)
 
+        all_ok = True
+        for chunk_start in range(0, total, self.BATCH_SIZE):
+            chunk = payments[chunk_start:chunk_start + self.BATCH_SIZE]
+            chunk_num = chunk_start // self.BATCH_SIZE + 1
+            chunk_id = f"{batch_id}-{chunk_num}"
+            payload = {"transaction_id": chunk_id, "payments": chunk}
+            chunk_ok = self._send_chunk(url, chunk_id, chunk, payload)
+            if not chunk_ok:
+                all_ok = False
+
+        return all_ok
+
+    def _send_chunk(self, url, chunk_id, chunk, payload):
         for attempt in range(3):
             try:
                 t0 = time.time()
@@ -120,42 +133,47 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                     timeout=self._timeout,
                 )
                 elapsed = time.time() - t0
-                logger.info("[BISTP][Batch] batch_id=%s → HTTP %s (%.3fs, tentativa %d/3)",
-                            batch_id, response.status_code, elapsed, attempt + 1)
+                logger.info("[BISTP][Batch] chunk_id=%s → HTTP %s (%.3fs, tentativa %d/3)",
+                            chunk_id, response.status_code, elapsed, attempt + 1)
 
                 if response.status_code == 200:
                     body = response.json()
-                    success = body.get('status') == 'success'
-                    if not success:
-                        logger.warning("[BISTP][Batch] batch_id=%s aceite mas status='%s'",
-                                       batch_id, body.get('status'))
-                    return success
+                    payment_results = body.get('payments', [])
+                    errors = [p for p in payment_results if str(p.get('status', '')).lower() != 'success']
+                    if errors:
+                        logger.warning("[BISTP][Batch] chunk_id=%s — %d/%d pagamentos com erro: %s",
+                                       chunk_id, len(errors), len(chunk),
+                                       [(e.get('household_id'), e.get('message')) for e in errors[:5]])
+                    else:
+                        logger.info("[BISTP][Batch] chunk_id=%s — todos %d pagamentos aceites",
+                                    chunk_id, len(chunk))
+                    return len(errors) == 0
 
                 if response.status_code == 401:
-                    logger.warning("[BISTP][Batch] batch_id=%s → 401 — a invalidar token e retry", batch_id)
+                    logger.warning("[BISTP][Batch] chunk_id=%s → 401 — a invalidar token e retry", chunk_id)
                     self._token_manager.invalidate()
                     continue
 
                 if response.status_code < 500:
-                    logger.error("[BISTP][Batch] batch_id=%s → HTTP %s (sem retry) body=%s",
-                                 batch_id, response.status_code, response.text[:300])
+                    logger.error("[BISTP][Batch] chunk_id=%s → HTTP %s (sem retry) body=%s",
+                                 chunk_id, response.status_code, response.text[:300])
                     return False
 
-                logger.warning("[BISTP][Batch] batch_id=%s → HTTP %s (tentativa %d/3)",
-                               batch_id, response.status_code, attempt + 1)
+                logger.warning("[BISTP][Batch] chunk_id=%s → HTTP %s (tentativa %d/3)",
+                               chunk_id, response.status_code, attempt + 1)
 
             except requests.Timeout:
-                logger.warning("[BISTP][Batch] batch_id=%s → Timeout (tentativa %d/3)", batch_id, attempt + 1)
+                logger.warning("[BISTP][Batch] chunk_id=%s → Timeout (tentativa %d/3)", chunk_id, attempt + 1)
             except requests.ConnectionError as exc:
-                logger.error("[BISTP][Batch] batch_id=%s → Erro de ligação: %s", batch_id, exc)
+                logger.error("[BISTP][Batch] chunk_id=%s → Erro de ligação: %s", chunk_id, exc)
                 return False
             except Exception:
-                logger.exception("[BISTP][Batch] batch_id=%s → Erro inesperado", batch_id)
+                logger.exception("[BISTP][Batch] chunk_id=%s → Erro inesperado", chunk_id)
                 return False
 
             time.sleep(2 ** attempt)
 
-        logger.error("[BISTP][Batch] batch_id=%s → FALHOU após 3 tentativas", batch_id)
+        logger.error("[BISTP][Batch] chunk_id=%s → FALHOU após 3 tentativas", chunk_id)
         return False
 
     def get_account_info(self, nib):
@@ -166,7 +184,7 @@ class BistpGatewayConnector(PaymentGatewayConnector):
             t0 = time.time()
             response = requests.get(
                 url,
-                params={'account_number': nib},
+                params={'account': nib},
                 headers=self._auth_headers(),
                 verify=self._ssl_verify,
                 timeout=self._timeout,

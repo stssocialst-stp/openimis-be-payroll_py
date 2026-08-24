@@ -59,6 +59,7 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
                 "nib_number": nib,
                 "amount": str(benefit.amount),
                 "payment_date": date.today().isoformat(),
+                "currency": "STN",
                 "programme_name": "Cash Distribution",
             })
             approved_benefits.append(benefit)
