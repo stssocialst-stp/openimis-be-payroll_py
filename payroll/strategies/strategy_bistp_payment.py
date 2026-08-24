@@ -24,7 +24,21 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
 
     @classmethod
     def make_payment_for_payroll(cls, payroll, user, **kwargs):
-        logger.info("[BISTP][Strategy] ====== INÍCIO DE PAGAMENTO — Payroll %s (%s) ======", payroll.id, payroll.name)
+        import os as _os
+        logger.info(
+            "[BISTP][Strategy] ====== INÍCIO DE PAGAMENTO — Payroll %s (%s) ======\n"
+            "  user:            %s\n"
+            "  BISTP_BASE_URL:  %s\n"
+            "  BISTP_PORT:      %s\n"
+            "  BISTP_CLIENT_ID: %s\n"
+            "  secret_defined:  %s",
+            payroll.id, payroll.name,
+            user.username if user else None,
+            _os.environ.get('BISTP_BASE_URL', '<NÃO DEFINIDO>'),
+            _os.environ.get('BISTP_PORT', '<NÃO DEFINIDO>'),
+            _os.environ.get('BISTP_CLIENT_ID', '<NÃO DEFINIDO>'),
+            bool(_os.environ.get('BISTP_CLIENT_SECRET', '')),
+        )
 
         if cls.PAYMENT_GATEWAY is None:
             cls.initialize_payment_gateway()

@@ -15,14 +15,20 @@ class BistpGatewayConnector(PaymentGatewayConnector):
 
     def __init__(self):
         self._token_manager = BistpTokenManager()
-        base_url = os.environ['BISTP_BASE_URL'].rstrip('/')
+        base_url = os.environ.get('BISTP_BASE_URL', '<NÃO DEFINIDO>').rstrip('/')
         port = os.environ.get('BISTP_PORT', '').strip()
         self._base_url = f"{base_url}:{port}" if port else base_url
         self._api_path = os.environ.get('BISTP_API_BASE_PATH', '/cxf/banco-mundial')
         self._ssl_verify = os.environ.get('BISTP_SSL_VERIFY', 'False').strip().lower() not in ('false', '0', '')
         self._timeout = int(os.environ.get('BISTP_TIMEOUT', '10'))
-        logger.info("[BISTP][Connector] Inicializado — base_url=%s, ssl_verify=%s, timeout=%ds",
-                    self._base_url, self._ssl_verify, self._timeout)
+        logger.info(
+            "[BISTP][Connector] === INICIALIZADO ===\n"
+            "  base_url:   %s\n"
+            "  api_path:   %s\n"
+            "  ssl_verify: %s\n"
+            "  timeout:    %ds",
+            self._base_url, self._api_path, self._ssl_verify, self._timeout,
+        )
 
     def _auth_headers(self):
         return {'Authorization': f'Bearer {self._token_manager.get_token()}'}
@@ -122,6 +128,15 @@ class BistpGatewayConnector(PaymentGatewayConnector):
         return all_ok
 
     def _send_chunk(self, url, chunk_id, chunk, payload):
+        logger.info(
+            "[BISTP][Batch] === A ENVIAR CHUNK ===\n"
+            "  chunk_id:   %s\n"
+            "  url:        %s\n"
+            "  pagamentos: %d\n"
+            "  1º item:    %s",
+            chunk_id, url, len(chunk),
+            {k: v for k, v in chunk[0].items() if k != 'nib_number'} if chunk else {},
+        )
         for attempt in range(3):
             try:
                 t0 = time.time()
@@ -133,8 +148,14 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                     timeout=self._timeout,
                 )
                 elapsed = time.time() - t0
-                logger.info("[BISTP][Batch] chunk_id=%s → HTTP %s (%.3fs, tentativa %d/3)",
-                            chunk_id, response.status_code, elapsed, attempt + 1)
+                logger.info(
+                    "[BISTP][Batch] chunk_id=%s → HTTP %s (%.3fs, tentativa %d/3)\n"
+                    "  Headers resposta: %s\n"
+                    "  Body: %s",
+                    chunk_id, response.status_code, elapsed, attempt + 1,
+                    dict(response.headers),
+                    response.text[:800],
+                )
 
                 if response.status_code == 200:
                     body = response.json()
@@ -156,11 +177,11 @@ class BistpGatewayConnector(PaymentGatewayConnector):
 
                 if response.status_code < 500:
                     logger.error("[BISTP][Batch] chunk_id=%s → HTTP %s (sem retry) body=%s",
-                                 chunk_id, response.status_code, response.text[:300])
+                                 chunk_id, response.status_code, response.text[:500])
                     return False
 
-                logger.warning("[BISTP][Batch] chunk_id=%s → HTTP %s (tentativa %d/3)",
-                               chunk_id, response.status_code, attempt + 1)
+                logger.warning("[BISTP][Batch] chunk_id=%s → HTTP %s (tentativa %d/3) body=%s",
+                               chunk_id, response.status_code, attempt + 1, response.text[:300])
 
             except requests.Timeout:
                 logger.warning("[BISTP][Batch] chunk_id=%s → Timeout (tentativa %d/3)", chunk_id, attempt + 1)
