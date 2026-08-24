@@ -52,7 +52,7 @@ class BistpTokenManager:
                 data={
                     'grant_type': 'client_credentials',
                     'client_id': client_id,
-                    'client_secret': os.environ.get('BISTP_CLIENT_SECRET', ''),
+                    'client_secret': os.environ['BISTP_CLIENT_SECRET'],
                 },
                 verify=ssl_verify,
                 timeout=timeout,
