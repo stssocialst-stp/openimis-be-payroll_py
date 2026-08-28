@@ -388,6 +388,9 @@ class Command(BaseCommand):
         individual.last_name = last_name
         if dob:
             individual.dob = dob
+        elif created and not individual.dob:
+            # dob é obrigatório no modelo — usar data placeholder quando ausente no Excel
+            individual.dob = date(1900, 1, 1)
         if nib:
             individual.nib = nib
         if location:
@@ -410,7 +413,9 @@ class Command(BaseCommand):
         individual.json_ext = json_ext
 
         if not dry_run:
-            individual.save(username=username)
+            # HistoryModel.save() recusa guardar se nada mudou — verificar is_dirty()
+            if created or individual.is_dirty():
+                individual.save(username=username)
 
         return individual, created
 
