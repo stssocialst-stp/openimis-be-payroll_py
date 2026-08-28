@@ -308,7 +308,7 @@ class Command(BaseCommand):
     def _build_location_cache(self):
         from location.models import Location
         cache = {}
-        for loc in Location.objects.filter(is_deleted=False, validity_to__isnull=True):
+        for loc in Location.objects.filter(validity_to__isnull=True):
             name_upper = loc.name.upper() if loc.name else ''
             cache[name_upper] = loc
             for canonical, aliases in DISTRICT_ALIASES.items():
