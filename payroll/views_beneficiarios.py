@@ -9,19 +9,36 @@ Endpoints:
 
 Todos os endpoints exigem autenticação JWT e utilizador staff (is_staff=True).
 """
+import importlib.util
 import json
 import logging
 import os
 import tempfile
 from io import StringIO
 
-from django.core.management import call_command
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 logger = logging.getLogger(__name__)
+
+_COMMANDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'management', 'commands')
+
+
+def _load_command(name):
+    """Carrega um management command pelo caminho do ficheiro, sem depender do registry Django."""
+    cmd_path = os.path.join(_COMMANDS_DIR, f'{name}.py')
+    if not os.path.exists(cmd_path):
+        raise FileNotFoundError(f"Comando não encontrado: {cmd_path}")
+    spec = importlib.util.spec_from_file_location(name, cmd_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cmd = module.Command()
+    out = StringIO()
+    cmd.stdout = out
+    cmd.stderr = StringIO()
+    return cmd, out
 
 
 def _require_staff(request):
@@ -56,12 +73,14 @@ def beneficiarios_backup(request):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            kwargs = {'output_dir': tmpdir, 'filename_prefix': 'backup_beneficiarios'}
-            if payroll_id:
-                kwargs['payroll_id'] = payroll_id
-
-            out = StringIO()
-            call_command('backup_beneficiarios', stdout=out, **kwargs)
+            cmd, out = _load_command('backup_beneficiarios')
+            opts = {
+                'output_dir': tmpdir,
+                'filename_prefix': 'backup_beneficiarios',
+                'payroll_id': payroll_id,
+                'verbosity': 1, 'no_color': False, 'force_color': False,
+            }
+            cmd.handle(**opts)
 
             import glob as _glob
             files = _glob.glob(os.path.join(tmpdir, 'backup_beneficiarios_*.json'))
@@ -110,19 +129,15 @@ def beneficiarios_limpar(request):
     force_skip = data.get('force_skip_financial', False)
 
     try:
-        out = StringIO()
-        kwargs = {'username': username, 'dry_run': dry_run, 'force_skip_financial': force_skip}
-        call_command('limpar_beneficiarios', stdout=out, **kwargs)
-
-        output = out.getvalue()
-        return Response({
-            'status': 'ok',
-            'dry_run': dry_run,
-            'output': output,
-        }, status=status.HTTP_200_OK)
+        cmd, out = _load_command('limpar_beneficiarios')
+        cmd.handle(
+            username=username, dry_run=dry_run, force_skip_financial=force_skip,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        return Response({'status': 'ok', 'dry_run': dry_run, 'output': out.getvalue()},
+                        status=status.HTTP_200_OK)
 
     except SystemExit as exc:
-        # CommandError causa SystemExit via call_command
         return Response(
             {'status': 'error', 'message': str(exc)},
             status=status.HTTP_400_BAD_REQUEST,
@@ -178,21 +193,17 @@ def beneficiarios_importar(request):
             tmp_path = tmp.name
 
         try:
-            out = StringIO()
-            kwargs = {
-                'username': username,
-                'dry_run': dry_run,
-                'benefit_type': benefit_type,
-            }
-            if sheet:
-                kwargs['sheet'] = sheet
-            if benefit_plan_id:
-                kwargs['benefit_plan_id'] = benefit_plan_id
-            if payroll_id:
-                kwargs['payroll_id'] = payroll_id
-
-            # excel_path é argumento posicional — passar como arg, não kwarg
-            call_command('import_beneficiarios_excel', tmp_path, stdout=out, **kwargs)
+            cmd, out = _load_command('import_beneficiarios_excel')
+            cmd.handle(
+                excel_path=tmp_path,
+                username=username,
+                dry_run=dry_run,
+                benefit_type=benefit_type,
+                sheet=sheet,
+                benefit_plan_id=benefit_plan_id,
+                payroll_id=payroll_id,
+                verbosity=1, no_color=False, force_color=False,
+            )
             output = out.getvalue()
         finally:
             os.unlink(tmp_path)
@@ -255,13 +266,14 @@ def beneficiarios_restore(request):
 
         try:
             out = StringIO()
-            kwargs = {
-                'username': username,
-                'dry_run': dry_run,
-                'skip_phases': skip_phases,
-            }
-            # backup_file é argumento posicional — passar como arg, não kwarg
-            call_command('restore_beneficiarios', tmp_path, stdout=out, **kwargs)
+            cmd, out = _load_command('restore_beneficiarios')
+            cmd.handle(
+                backup_file=tmp_path,
+                username=username,
+                dry_run=dry_run,
+                skip_phases=skip_phases,
+                verbosity=1, no_color=False, force_color=False,
+            )
             output = out.getvalue()
         finally:
             os.unlink(tmp_path)
