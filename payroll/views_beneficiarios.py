@@ -180,7 +180,6 @@ def beneficiarios_importar(request):
         try:
             out = StringIO()
             kwargs = {
-                'excel_path': tmp_path,
                 'username': username,
                 'dry_run': dry_run,
                 'benefit_type': benefit_type,
@@ -192,7 +191,8 @@ def beneficiarios_importar(request):
             if payroll_id:
                 kwargs['payroll_id'] = payroll_id
 
-            call_command('import_beneficiarios_excel', stdout=out, **kwargs)
+            # excel_path é argumento posicional — passar como arg, não kwarg
+            call_command('import_beneficiarios_excel', tmp_path, stdout=out, **kwargs)
             output = out.getvalue()
         finally:
             os.unlink(tmp_path)
@@ -256,12 +256,12 @@ def beneficiarios_restore(request):
         try:
             out = StringIO()
             kwargs = {
-                'backup_file': tmp_path,
                 'username': username,
                 'dry_run': dry_run,
                 'skip_phases': skip_phases,
             }
-            call_command('restore_beneficiarios', stdout=out, **kwargs)
+            # backup_file é argumento posicional — passar como arg, não kwarg
+            call_command('restore_beneficiarios', tmp_path, stdout=out, **kwargs)
             output = out.getvalue()
         finally:
             os.unlink(tmp_path)
