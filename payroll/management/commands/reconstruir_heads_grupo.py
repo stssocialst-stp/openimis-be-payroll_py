@@ -147,10 +147,10 @@ class Command(BaseCommand):
             # Grupos que têm HEAD activo com Individual válido
             groups_with_head = Group.objects.filter(
                 is_deleted=False,
-                groupindividual__role=GroupIndividual.Role.HEAD,
-                groupindividual__is_deleted=False,
-                groupindividual__individual__isnull=False,
-                groupindividual__individual__is_deleted=False,
+                groupindividuals__role=GroupIndividual.Role.HEAD,
+                groupindividuals__is_deleted=False,
+                groupindividuals__individual__isnull=False,
+                groupindividuals__individual__is_deleted=False,
             ).distinct()
 
             self.stdout.write(f"  Grupos com HEAD válido: {groups_with_head.count()}")
