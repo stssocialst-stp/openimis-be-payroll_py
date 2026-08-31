@@ -152,7 +152,10 @@ class CreatePayrollMutation(BaseHistoryModelCreateMutationMixin, BaseMutation):
             data.pop('client_mutation_label')
 
         service = PayrollService(user)
-        response = service.create_async(data)
+        # Usar create() síncrono — create_async() depende de Celery que pode não estar activo.
+        # Para datasets grandes (>5000 registos) pode demorar alguns segundos, mas garante
+        # que os BenefitConsumptions são criados antes de retornar a resposta.
+        response = service.create(data)
         if client_mutation_id and response['success']:
             payroll_id = response['data']['id']
             payroll = Payroll.objects.get(id=payroll_id)
