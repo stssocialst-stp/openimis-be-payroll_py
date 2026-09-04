@@ -1,4 +1,7 @@
 import logging
+import os
+from io import StringIO
+
 from celery import shared_task
 
 from core.models import User
@@ -7,6 +10,135 @@ from payroll.strategies import StrategyOnlinePayment
 from payroll.payments_registry import PaymentMethodStorage
 
 logger = logging.getLogger(__name__)
+
+BACKUP_DIR = '/tmp/kenon_beneficiarios_backups'
+
+
+def _update_mutation_log(client_mutation_id, status, error=None, json_ext=None):
+    try:
+        from core.models import MutationLog
+        log = MutationLog.objects.filter(client_mutation_id=client_mutation_id).first()
+        if not log:
+            return
+        log.status = status
+        if error is not None:
+            log.error = str(error)[:4000]
+        if json_ext is not None:
+            log.json_ext = json_ext
+        log.save()
+    except Exception as exc:
+        logger.error(f"[MutationLog] update failed for {client_mutation_id}: {exc}")
+
+
+@shared_task
+def backup_beneficiarios_task(client_mutation_id, payroll_id, username):
+    import glob as _glob
+    from payroll.management.commands.backup_beneficiarios import Command
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        cmd = Command()
+        cmd.stdout = StringIO()
+        cmd.stderr = StringIO()
+        cmd.handle(
+            output_dir=BACKUP_DIR,
+            filename_prefix='backup_beneficiarios',
+            payroll_id=payroll_id,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        files = sorted(
+            _glob.glob(os.path.join(BACKUP_DIR, 'backup_beneficiarios_*.json')),
+            key=os.path.getmtime, reverse=True,
+        )
+        if not files:
+            raise RuntimeError("Ficheiro de backup não gerado")
+        _update_mutation_log(client_mutation_id, 2, json_ext={
+            'backup_file': os.path.basename(files[0]),
+        })
+    except Exception as exc:
+        logger.error(f"[backup_beneficiarios_task] {exc}")
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+
+
+@shared_task
+def limpar_beneficiarios_task(client_mutation_id, username, dry_run, force_skip_financial):
+    from payroll.management.commands.limpar_beneficiarios import Command
+    try:
+        cmd = Command()
+        out = StringIO()
+        cmd.stdout = out
+        cmd.stderr = StringIO()
+        cmd.handle(
+            username=username,
+            dry_run=dry_run,
+            force_skip_financial=force_skip_financial,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        _update_mutation_log(client_mutation_id, 2, json_ext={'output': out.getvalue()})
+    except SystemExit as exc:
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    except Exception as exc:
+        logger.error(f"[limpar_beneficiarios_task] {exc}")
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+
+
+@shared_task
+def importar_beneficiarios_task(client_mutation_id, tmp_excel_path, username,
+                                 dry_run, sheet, benefit_plan_id, payroll_id, benefit_type):
+    from payroll.management.commands.import_beneficiarios_excel import Command
+    try:
+        cmd = Command()
+        out = StringIO()
+        cmd.stdout = out
+        cmd.stderr = StringIO()
+        cmd.handle(
+            excel_path=tmp_excel_path,
+            username=username,
+            dry_run=dry_run,
+            benefit_type=benefit_type,
+            sheet=sheet,
+            benefit_plan_id=benefit_plan_id,
+            payroll_id=payroll_id,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        _update_mutation_log(client_mutation_id, 2, json_ext={'output': out.getvalue()})
+    except SystemExit as exc:
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    except Exception as exc:
+        logger.error(f"[importar_beneficiarios_task] {exc}")
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    finally:
+        try:
+            os.unlink(tmp_excel_path)
+        except Exception:
+            pass
+
+
+@shared_task
+def restore_beneficiarios_task(client_mutation_id, tmp_backup_path, username, dry_run, skip_phases):
+    from payroll.management.commands.restore_beneficiarios import Command
+    try:
+        cmd = Command()
+        out = StringIO()
+        cmd.stdout = out
+        cmd.stderr = StringIO()
+        cmd.handle(
+            backup_file=tmp_backup_path,
+            username=username,
+            dry_run=dry_run,
+            skip_phases=skip_phases,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        _update_mutation_log(client_mutation_id, 2, json_ext={'output': out.getvalue()})
+    except SystemExit as exc:
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    except Exception as exc:
+        logger.error(f"[restore_beneficiarios_task] {exc}")
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    finally:
+        try:
+            os.unlink(tmp_backup_path)
+        except Exception:
+            pass
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
