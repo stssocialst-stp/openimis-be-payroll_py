@@ -3,6 +3,7 @@ import pandas as pd
 from io import BytesIO
 
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils.translation import gettext as _
 
@@ -25,7 +26,8 @@ from payroll.models import (
 )
 from payroll.tasks import send_requests_to_gateway_payment
 from payroll.payments_registry import PaymentMethodStorage
-from payroll.validation import PaymentPointValidation, PayrollValidation, BenefitConsumptionValidation
+from payroll.validation import PaymentPointValidation, PayrollValidation, BenefitConsumptionValidation, \
+    validate_payment_date, validate_payment_date_update
 from payroll.strategies import StrategyOfPaymentInterface
 from calculation.services import get_calculation_object
 from core.services.utils import output_exception, check_authentication
@@ -69,6 +71,7 @@ class PayrollService(BaseService):
         try:
             with transaction.atomic():
                 obj_data = self._adjust_create_payload(obj_data)
+                self._validate_payment_date(obj_data)
                 from_failed_invoices_payroll_id = obj_data.pop("from_failed_invoices_payroll_id", None)
                 payment_plan = self._get_payment_plan(obj_data)
                 payment_cycle = self._get_payment_cycle(obj_data)
@@ -99,6 +102,7 @@ class PayrollService(BaseService):
         """
         try:
             obj_data = self._adjust_create_payload(obj_data)
+            self._validate_payment_date(obj_data)
             from_failed_invoices_payroll_id = obj_data.pop("from_failed_invoices_payroll_id", None)
 
             with transaction.atomic():
@@ -209,6 +213,25 @@ class PayrollService(BaseService):
     def make_payment_for_payroll(self, obj_data):
         payroll_id = obj_data['id']
         send_requests_to_gateway_payment.delay(payroll_id, self.user.id)
+
+    @check_authentication
+    @register_service_signal('payroll_service.update_payment_date')
+    def update_payment_date(self, obj_data):
+        try:
+            with transaction.atomic():
+                payroll = Payroll.objects.select_for_update().get(id=obj_data['id'], is_deleted=False)
+                errors = validate_payment_date_update(payroll, obj_data)
+                if errors:
+                    raise ValidationError(errors)
+                payroll.payment_date = obj_data['payment_date']
+                return self.save_instance(payroll)
+        except Exception as exc:
+            return output_exception(model_name=self.OBJECT_TYPE.__name__, method="update", exception=exc)
+
+    def _validate_payment_date(self, obj_data):
+        errors = validate_payment_date(obj_data)
+        if errors:
+            raise ValidationError(errors)
 
     def _save_payroll(self, obj_data):
         obj_ = self.OBJECT_TYPE(**obj_data)

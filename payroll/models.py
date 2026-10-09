@@ -43,6 +43,7 @@ class Payroll(HistoryBusinessModel):
         max_length=100, choices=PayrollStatus.choices, default=PayrollStatus.PENDING_APPROVAL, null=False
     )
     payment_method = models.CharField(max_length=255, blank=True, null=True)
+    payment_date = DateField(null=True, blank=True)
 
     def __str__(self):
         return f"Payroll {self.name} - {self.uuid}"
@@ -71,6 +72,7 @@ class BenefitConsumption(HistoryBusinessModel):
     status = models.CharField(
         max_length=100, choices=BenefitConsumptionStatus.choices, default=BenefitConsumptionStatus.ACCEPTED, null=False
     )
+    payment_date = DateField(null=True, blank=True)
 
     def __str__(self):
         return f"Benefit Consumption {self.code} - {self.receipt} - {self.amount}"

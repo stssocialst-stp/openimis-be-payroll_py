@@ -71,6 +71,7 @@ class BenefitConsumptionGQLType(DjangoObjectType):
             "type": ["exact", "startswith", "icontains"],
             "amount": ["exact", "lt", "lte", "gt", "gte"],
             "date_due": ["exact", "lt", "lte", "gt", "gte"],
+            "payment_date": ["exact", "lt", "lte", "gt", "gte"],
             **prefix_filterset("individual__", IndividualGQLType._meta.filter_fields),
 
             "date_created": ["exact", "lt", "lte", "gt", "gte"],
@@ -112,6 +113,7 @@ class PayrollGQLType(DjangoObjectType):
             "name": ["iexact", "istartswith", "icontains"],
             "status": ["exact", "startswith", "contains"],
             "payment_method": ["exact", "startswith", "contains"],
+            "payment_date": ["exact", "lt", "lte", "gt", "gte"],
             **prefix_filterset("payment_point__", PaymentPointGQLType._meta.filter_fields),
             **prefix_filterset("payment_plan__", PaymentPlanGQLType._meta.filter_fields),
             **prefix_filterset("payment_cycle__", PaymentCycleGQLType._meta.filter_fields),

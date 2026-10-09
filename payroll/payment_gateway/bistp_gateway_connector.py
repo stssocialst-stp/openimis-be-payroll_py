@@ -33,7 +33,7 @@ class BistpGatewayConnector(PaymentGatewayConnector):
     def _auth_headers(self):
         return {'Authorization': f'Bearer {self._token_manager.get_token()}'}
 
-    def send_payment(self, invoice_id, amount, nib=None, household_id=None, **kwargs):
+    def send_payment(self, invoice_id, amount, nib=None, household_id=None, payment_date=None, **kwargs):
         url = f"{self._base_url}{self._api_path}/api/payments/initiate"
         nib_masked = f"{nib[:4]}***{nib[-2:]}" if nib and len(nib) > 6 else nib
         payload = {
@@ -42,7 +42,7 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                 "household_id": str(household_id),
                 "nib_number": nib,
                 "amount": str(amount),
-                "payment_date": date.today().isoformat(),
+                "payment_date": (payment_date or date.today()).isoformat(),
                 "programme_name": "Cash Distribution",
             }],
         }

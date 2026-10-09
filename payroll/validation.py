@@ -1,8 +1,13 @@
+import datetime
+
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext as _
 
 from core.validation import BaseModelValidation
-from payroll.models import PaymentPoint, Payroll, PayrollBill, BenefitConsumption
+from payroll.models import PaymentPoint, Payroll, PayrollBill, BenefitConsumption, PayrollStatus
+
+BISTP_PAYMENT_METHOD = "StrategyBistpPayment"
+PAYMENT_DATE_EDITABLE_STATUSES = (PayrollStatus.PENDING_APPROVAL, PayrollStatus.APPROVE_FOR_PAYMENT)
 
 
 class PaymentPointValidation(BaseModelValidation):
@@ -84,3 +89,31 @@ def validate_not_empty_field(data, field):
             'field': field
         }}]
     return []
+
+
+def validate_payment_date(data):
+    payment_date = data.get('payment_date')
+    if not payment_date:
+        if data.get('payment_method') == BISTP_PAYMENT_METHOD:
+            return [{"message": _("payroll.validation.payroll.payment_date_required")}]
+        return []
+    if payment_date < datetime.date.today():
+        return [{"message": _("payroll.validation.payroll.payment_date_in_past")}]
+    return []
+
+
+def validate_payment_date_update(payroll, data):
+    errors = []
+    if payroll.status not in PAYMENT_DATE_EDITABLE_STATUSES:
+        errors.append({"message": _("payroll.validation.payroll.payment_date_locked")})
+    elif BenefitConsumption.objects.filter(
+            payrollbenefitconsumption__payroll=payroll,
+            payment_date__isnull=False,
+            is_deleted=False,
+    ).exists():
+        errors.append({"message": _("payroll.validation.payroll.payment_date_locked")})
+    if not data.get('payment_date'):
+        errors.append({"message": _("payroll.validation.payroll.payment_date_required")})
+    else:
+        errors.extend(validate_payment_date(data))
+    return errors

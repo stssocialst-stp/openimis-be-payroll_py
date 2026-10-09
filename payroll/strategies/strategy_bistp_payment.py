@@ -43,6 +43,15 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
         if cls.PAYMENT_GATEWAY is None:
             cls.initialize_payment_gateway()
 
+        payment_date = payroll.payment_date
+        if payment_date is None:
+            payment_date = date.today()
+            logger.warning("[BISTP][Strategy] Payroll %s sem payment_date — a usar a data de hoje (%s)",
+                           payroll.id, payment_date)
+        elif payment_date < date.today():
+            logger.warning("[BISTP][Strategy] Payroll %s com payment_date no passado (%s)",
+                           payroll.id, payment_date)
+
         benefits = StrategyOnlinePayment.get_benefits_attached_to_payroll(
             payroll, BenefitConsumptionStatus.ACCEPTED
         )
@@ -72,7 +81,7 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
                 "household_id": str(benefit.individual_id),
                 "nib_number": nib,
                 "amount": str(benefit.amount),
-                "payment_date": date.today().isoformat(),
+                "payment_date": payment_date.isoformat(),
                 "currency": "STN",
                 "programme_name": "Cash Distribution",
             })
@@ -88,6 +97,11 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
         ok = cls.PAYMENT_GATEWAY.send_payment_batch(str(payroll.id), batch_payments)
 
         if ok:
+            if payroll.payment_date is None:
+                payroll.payment_date = payment_date
+                payroll.save(username=user.username)
+            for benefit in approved_benefits:
+                benefit.payment_date = payment_date
             StrategyOnlinePayment.approve_for_payment_benefit_consumption(approved_benefits, user)
             logger.info("[BISTP][Strategy] ====== FIM — Payroll %s — batch aceite, %d → APPROVE_FOR_PAYMENT ======",
                         payroll.id, len(approved_benefits))

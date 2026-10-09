@@ -13,7 +13,8 @@ from location.services import get_ancestor_location_filter
 from payroll.apps import PayrollConfig
 from payroll.gql_mutations import CreatePaymentPointMutation, UpdatePaymentPointMutation, DeletePaymentPointMutation, \
     CreatePayrollMutation, DeletePayrollMutation, ClosePayrollMutation, \
-    RejectPayrollMutation, MakePaymentForPayrollMutation, DeleteBenefitConsumptionMutation
+    RejectPayrollMutation, MakePaymentForPayrollMutation, DeleteBenefitConsumptionMutation, \
+    UpdatePayrollPaymentDateMutation
 from payroll.gql_queries import BenefitConsumptionGQLType, PaymentPointGQLType, \
     PayrollGQLType, PaymentMethodGQLType, \
     PaymentMethodListGQLType, BenefitAttachmentListGQLType, \
@@ -328,4 +329,5 @@ class Mutation(graphene.ObjectType):
     close_payroll = ClosePayrollMutation.Field()
     reject_payroll = RejectPayrollMutation.Field()
     make_payment_for_payroll = MakePaymentForPayrollMutation.Field()
+    update_payroll_payment_date = UpdatePayrollPaymentDateMutation.Field()
     delete_benefit_consumption = DeleteBenefitConsumptionMutation.Field()

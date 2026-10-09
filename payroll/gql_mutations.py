@@ -49,7 +49,13 @@ class CreatePayrollInput(OpenIMISMutation.Input):
 
     date_valid_from = graphene.Date(required=False)
     date_valid_to = graphene.Date(required=False)
+    payment_date = graphene.Date(required=False)
     json_ext = graphene.JSONString(required=False)
+
+
+class UpdatePayrollPaymentDateInputType(OpenIMISMutation.Input):
+    id = graphene.UUID(required=True)
+    payment_date = graphene.Date(required=True)
 
 
 class DeletePayrollInputType(DeletePaymentPointInputType):
@@ -164,6 +170,32 @@ class CreatePayrollMutation(BaseHistoryModelCreateMutationMixin, BaseMutation):
         return None
 
     class Input(CreatePayrollInput):
+        pass
+
+
+class UpdatePayrollPaymentDateMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
+    _mutation_class = "UpdatePayrollPaymentDateMutation"
+    _mutation_module = "payroll"
+    _model = Payroll
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        if type(user) is AnonymousUser or not user.id or not user.has_perms(
+                PayrollConfig.gql_payroll_create_perms):
+            raise ValidationError("mutation.authentication_required")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        data.pop('client_mutation_id', None)
+        data.pop('client_mutation_label', None)
+
+        service = PayrollService(user)
+        response = service.update_payment_date(data)
+        if not response['success']:
+            return response
+        return None
+
+    class Input(UpdatePayrollPaymentDateInputType):
         pass
 
 
