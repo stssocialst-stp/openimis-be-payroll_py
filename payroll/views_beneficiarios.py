@@ -144,7 +144,6 @@ def beneficiarios_limpar(request):
 
     Body JSON:
       {
-        "username": "admin",
         "dry_run": true,
         "force_skip_financial": false
       }
@@ -160,7 +159,7 @@ def beneficiarios_limpar(request):
         return deny
 
     data = request.data or {}
-    username = data.get('username', 'admin')
+    username = request.user.username
     dry_run = data.get('dry_run', True)
     force_skip = data.get('force_skip_financial', False)
 
@@ -186,7 +185,6 @@ def beneficiarios_importar(request):
 
     Campos do form:
       file              — ficheiro .xlsx (obrigatório)
-      username          — utilizador openIMIS (default: admin)
       dry_run           — true/false (default: false)
       sheet             — nome da sheet (opcional)
       benefit_plan_id   — UUID do BenefitPlan (opcional)
@@ -210,7 +208,7 @@ def beneficiarios_importar(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    username = request.data.get('username', 'admin')
+    username = request.user.username
     dry_run = str(request.data.get('dry_run', 'false')).lower() in ('true', '1', 'yes')
     sheet = request.data.get('sheet') or None
     benefit_plan_id = request.data.get('benefit_plan_id') or None
@@ -246,7 +244,6 @@ def beneficiarios_restore(request):
 
     Campos do form:
       file          — ficheiro .json de backup (obrigatório)
-      username      — utilizador openIMIS (default: admin)
       dry_run       — true/false (default: true)
       skip_phases   — fases a ignorar separadas por vírgula
 
@@ -267,7 +264,7 @@ def beneficiarios_restore(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    username = request.data.get('username', 'admin')
+    username = request.user.username
     dry_run = str(request.data.get('dry_run', 'true')).lower() in ('true', '1', 'yes')
     skip_phases_raw = request.data.get('skip_phases', '')
     skip_phases = [p.strip() for p in skip_phases_raw.split(',') if p.strip()] if skip_phases_raw else []

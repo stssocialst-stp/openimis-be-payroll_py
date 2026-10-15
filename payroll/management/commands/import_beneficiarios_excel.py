@@ -91,6 +91,11 @@ class Command(BaseCommand):
         payroll_id = options['payroll_id']
         benefit_type = options['benefit_type']
 
+        # HistoryModel.save() exige um User existente — validar antes de processar as linhas
+        from core.models import User
+        if not User.objects.filter(username=username).exists():
+            raise CommandError(f"Utilizador openIMIS não encontrado: {username}")
+
         self.stdout.write(f"[import] Ficheiro : {excel_path}")
         self.stdout.write(f"[import] dry-run  : {dry_run}")
         self.stdout.write(f"[import] username  : {username}")
