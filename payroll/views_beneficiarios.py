@@ -18,9 +18,9 @@ Endpoints:
   POST /api/payroll/beneficiarios/restore/   — restaura backup JSON (multipart)
   GET  /api/payroll/beneficiarios/backup/<client_mutation_id>/download/  — descarrega ficheiro
 """
+import base64
 import logging
 import os
-import tempfile
 import uuid
 
 from django.http import FileResponse, Http404
@@ -217,21 +217,15 @@ def beneficiarios_importar(request):
     payroll_id = request.data.get('payroll_id') or None
     benefit_type = request.data.get('benefit_type', 'CASH')
 
-    # Guardar ficheiro em localização persistente (não apagar antes do task correr)
+    # O conteúdo segue na mensagem do task: o worker corre noutro container e não vê o /tmp da API
     suffix = os.path.splitext(excel_file.name)[-1] or '.xlsx'
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix='kenon_import_')
-    try:
-        for chunk in excel_file.chunks():
-            tmp.write(chunk)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
+    excel_b64 = base64.b64encode(excel_file.read()).decode('ascii')
 
     label = 'Importar Beneficiários (dry-run)' if dry_run else 'Importar Beneficiários'
     log = _create_mutation_log(label, details=excel_file.name)
     importar_beneficiarios_task.delay(
-        log.client_mutation_id, tmp_path, username,
-        dry_run, sheet, benefit_plan_id, payroll_id, benefit_type,
+        log.client_mutation_id, excel_b64, username,
+        dry_run, sheet, benefit_plan_id, payroll_id, benefit_type, suffix,
     )
 
     return Response({
@@ -278,17 +272,11 @@ def beneficiarios_restore(request):
     skip_phases_raw = request.data.get('skip_phases', '')
     skip_phases = [p.strip() for p in skip_phases_raw.split(',') if p.strip()] if skip_phases_raw else []
 
-    tmp = tempfile.NamedTemporaryFile(suffix='.json', delete=False, prefix='kenon_restore_')
-    try:
-        for chunk in backup_file.chunks():
-            tmp.write(chunk)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
+    backup_b64 = base64.b64encode(backup_file.read()).decode('ascii')
 
     label = 'Restore Beneficiários (dry-run)' if dry_run else 'Restore Beneficiários'
     log = _create_mutation_log(label)
-    restore_beneficiarios_task.delay(log.client_mutation_id, tmp_path, username, dry_run, skip_phases)
+    restore_beneficiarios_task.delay(log.client_mutation_id, backup_b64, username, dry_run, skip_phases)
 
     return Response({
         'clientMutationId': log.client_mutation_id,

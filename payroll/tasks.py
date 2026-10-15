@@ -1,5 +1,7 @@
+import base64
 import logging
 import os
+import tempfile
 from io import StringIO
 
 from celery import shared_task
@@ -12,6 +14,16 @@ from payroll.payments_registry import PaymentMethodStorage
 logger = logging.getLogger(__name__)
 
 BACKUP_DIR = '/tmp/kenon_beneficiarios_backups'
+
+
+def _write_temp_file(content_b64, suffix, prefix):
+    # O upload chega no container da API; o ficheiro é recriado aqui porque o worker não partilha o /tmp
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix=prefix)
+    try:
+        tmp.write(base64.b64decode(content_b64))
+        return tmp.name
+    finally:
+        tmp.close()
 
 
 def _update_mutation_log(client_mutation_id, status, error=None, json_ext=None):
@@ -82,10 +94,12 @@ def limpar_beneficiarios_task(client_mutation_id, username, dry_run, force_skip_
 
 
 @shared_task
-def importar_beneficiarios_task(client_mutation_id, tmp_excel_path, username,
-                                 dry_run, sheet, benefit_plan_id, payroll_id, benefit_type):
+def importar_beneficiarios_task(client_mutation_id, excel_b64, username,
+                                 dry_run, sheet, benefit_plan_id, payroll_id, benefit_type, suffix='.xlsx'):
     from payroll.management.commands.import_beneficiarios_excel import Command
+    tmp_excel_path = None
     try:
+        tmp_excel_path = _write_temp_file(excel_b64, suffix, 'kenon_import_')
         cmd = Command()
         out = StringIO()
         cmd.stdout = out
@@ -107,16 +121,19 @@ def importar_beneficiarios_task(client_mutation_id, tmp_excel_path, username,
         logger.error(f"[importar_beneficiarios_task] {exc}")
         _update_mutation_log(client_mutation_id, 1, error=str(exc))
     finally:
-        try:
-            os.unlink(tmp_excel_path)
-        except Exception:
-            pass
+        if tmp_excel_path:
+            try:
+                os.unlink(tmp_excel_path)
+            except Exception:
+                pass
 
 
 @shared_task
-def restore_beneficiarios_task(client_mutation_id, tmp_backup_path, username, dry_run, skip_phases):
+def restore_beneficiarios_task(client_mutation_id, backup_b64, username, dry_run, skip_phases):
     from payroll.management.commands.restore_beneficiarios import Command
+    tmp_backup_path = None
     try:
+        tmp_backup_path = _write_temp_file(backup_b64, '.json', 'kenon_restore_')
         cmd = Command()
         out = StringIO()
         cmd.stdout = out
@@ -135,10 +152,11 @@ def restore_beneficiarios_task(client_mutation_id, tmp_backup_path, username, dr
         logger.error(f"[restore_beneficiarios_task] {exc}")
         _update_mutation_log(client_mutation_id, 1, error=str(exc))
     finally:
-        try:
-            os.unlink(tmp_backup_path)
-        except Exception:
-            pass
+        if tmp_backup_path:
+            try:
+                os.unlink(tmp_backup_path)
+            except Exception:
+                pass
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
