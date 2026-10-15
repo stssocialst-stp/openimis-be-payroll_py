@@ -160,6 +160,10 @@ class Command(BaseCommand):
             'errors': [],
         }
 
+        # Individuals já usados por uma linha deste ficheiro: o mesmo BI em linhas diferentes
+        # (outro agregado) dá origem a pessoas distintas em vez de sobrescrever a anterior
+        claimed_ids = set()
+
         for line_num, row in enumerate(rows[1:], start=2):
             if all(v is None for v in row):
                 continue
@@ -210,7 +214,9 @@ class Command(BaseCommand):
                         location=location,
                         username=username,
                         dry_run=dry_run,
+                        claimed_ids=claimed_ids,
                     )
+                    claimed_ids.add(individual.id)
 
                     if ind_created:
                         stats['ind_created'] += 1
@@ -357,7 +363,7 @@ class Command(BaseCommand):
 
     def _get_or_create_individual(self, *, agregado_id, bi_str, first_name, last_name,
                                    dob, nib, sexo, pan, subconta, categoria, index_csu,
-                                   location, username, dry_run):
+                                   location, username, dry_run, claimed_ids):
         from individual.models import Individual
 
         individual = None
@@ -369,15 +375,13 @@ class Command(BaseCommand):
                 json_ext__agregado_id=agregado_id, is_deleted=False
             ).first()
 
-        # Match 2: json_ext BI
+        # Match 2: json_ext BI — ignora Individuals já atribuídos a outra linha do ficheiro
         if individual is None and bi_str:
+            candidates = Individual.objects.filter(is_deleted=False).exclude(id__in=claimed_ids)
             individual = (
-                Individual.objects.filter(
-                    json_ext__bilhete_didentidade=bi_str, is_deleted=False
-                ).first()
-                or Individual.objects.filter(
-                    json_ext__bilhete_didentidade=int(bi_str) if bi_str.isdigit() else None,
-                    is_deleted=False
+                candidates.filter(json_ext__bilhete_didentidade=bi_str).first()
+                or candidates.filter(
+                    json_ext__bilhete_didentidade=int(bi_str) if bi_str.isdigit() else None
                 ).first()
             )
 
