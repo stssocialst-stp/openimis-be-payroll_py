@@ -220,3 +220,5 @@ When the `payment_method` of a Payroll is set to `StrategyOfflinePayment`, the c
    - Unpaid payroll invoices can be recreated during the re-creation of payroll in the reconciled payroll section.
    - The unpaid invoices will be included in the new payroll.
    - Use the `Create Payroll from Unpaid Invoices` button available when you go to `Legal and Finance -> Reconciled Payrolls -> View Reconciled Payroll -> Create Payment from Failed Invoice`.
+
+# Sty
