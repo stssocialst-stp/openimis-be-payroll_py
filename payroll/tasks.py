@@ -94,6 +94,30 @@ def limpar_beneficiarios_task(client_mutation_id, username, dry_run, force_skip_
 
 
 @shared_task
+def sincronizar_beneficiarios_task(client_mutation_id, benefit_plan_code, username, dry_run):
+    from payroll.management.commands.reconstruir_heads_grupo import Command
+    try:
+        cmd = Command()
+        out = StringIO()
+        cmd.stdout = out
+        cmd.stderr = StringIO()
+        cmd.handle(
+            benefit_plan_code=benefit_plan_code,
+            username=username,
+            dry_run=dry_run,
+            skip_cleanup=False,
+            skip_create=False,
+            verbosity=1, no_color=False, force_color=False,
+        )
+        _update_mutation_log(client_mutation_id, 2, json_ext={'output': out.getvalue()})
+    except SystemExit as exc:
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+    except Exception as exc:
+        logger.error(f"[sincronizar_beneficiarios_task] {exc}")
+        _update_mutation_log(client_mutation_id, 1, error=str(exc))
+
+
+@shared_task
 def importar_beneficiarios_task(client_mutation_id, excel_b64, username,
                                  dry_run, sheet, benefit_plan_id, payroll_id, benefit_type, suffix='.xlsx'):
     from payroll.management.commands.import_beneficiarios_excel import Command

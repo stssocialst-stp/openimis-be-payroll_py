@@ -16,6 +16,7 @@ Endpoints:
   POST /api/payroll/beneficiarios/limpar/    — soft-delete com dry-run
   POST /api/payroll/beneficiarios/importar/  — importa Excel (multipart)
   POST /api/payroll/beneficiarios/restore/   — restaura backup JSON (multipart)
+  POST /api/payroll/beneficiarios/sincronizar/ — liga os grupos actuais a um programa GROUP
   GET  /api/payroll/beneficiarios/backup/<client_mutation_id>/download/  — descarrega ficheiro
 """
 import base64
@@ -34,6 +35,7 @@ from payroll.tasks import (
     limpar_beneficiarios_task,
     importar_beneficiarios_task,
     restore_beneficiarios_task,
+    sincronizar_beneficiarios_task,
     BACKUP_DIR,
 )
 
@@ -280,4 +282,65 @@ def beneficiarios_restore(request):
         'status': 'pending',
         'dry_run': dry_run,
         'message': 'Restore iniciado em background. Monitorize via mutationLogs.',
+    }, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def beneficiarios_sincronizar(request):
+    """
+    Inicia sincronização assíncrona dos GroupBeneficiary de um programa GROUP
+    (comando reconstruir_heads_grupo): remove os que ficaram sem HEAD activo e
+    cria os que faltam para os grupos com HEAD activo.
+
+    Body JSON ou form:
+      benefit_plan  — UUID do BenefitPlan (obrigatório)
+      dry_run       — true/false (default: false)
+
+    Resposta imediata:
+      { "clientMutationId": "...", "status": "pending" }
+
+    Após conclusão (poll em mutationLogs):
+      jsonExt.output — log do comando
+    """
+    deny = _require_staff(request)
+    if deny:
+        return deny
+
+    from social_protection.models import BenefitPlan
+
+    benefit_plan_id = request.data.get('benefit_plan')
+    if not benefit_plan_id:
+        return Response(
+            {'status': 'error', 'message': "Campo 'benefit_plan' obrigatório"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        benefit_plan = BenefitPlan.objects.filter(id=benefit_plan_id, is_deleted=False).first()
+    except Exception:
+        benefit_plan = None
+    if not benefit_plan:
+        return Response(
+            {'status': 'error', 'message': f"Programa não encontrado: {benefit_plan_id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    if benefit_plan.type != BenefitPlan.BenefitPlanType.GROUP_TYPE:
+        return Response(
+            {'status': 'error', 'message': 'A sincronização só se aplica a programas do tipo GROUP'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    dry_run = str(request.data.get('dry_run', 'false')).lower() in ('true', '1', 'yes')
+
+    label = 'Sincronizar Beneficiários (dry-run)' if dry_run else 'Sincronizar Beneficiários'
+    log = _create_mutation_log(label, details=benefit_plan.code)
+    sincronizar_beneficiarios_task.delay(
+        log.client_mutation_id, benefit_plan.code, request.user.username, dry_run,
+    )
+
+    return Response({
+        'clientMutationId': log.client_mutation_id,
+        'status': 'pending',
+        'dry_run': dry_run,
+        'message': 'Sincronização iniciada em background. Monitorize via mutationLogs.',
     }, status=status.HTTP_202_ACCEPTED)

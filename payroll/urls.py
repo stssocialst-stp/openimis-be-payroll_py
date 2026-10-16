@@ -12,6 +12,7 @@ from payroll.views_beneficiarios import (
     beneficiarios_limpar,
     beneficiarios_importar,
     beneficiarios_restore,
+    beneficiarios_sincronizar,
 )
 
 urlpatterns = [
@@ -24,4 +25,5 @@ urlpatterns = [
     path('beneficiarios/limpar/', beneficiarios_limpar),
     path('beneficiarios/importar/', beneficiarios_importar),
     path('beneficiarios/restore/', beneficiarios_restore),
+    path('beneficiarios/sincronizar/', beneficiarios_sincronizar),
 ]
