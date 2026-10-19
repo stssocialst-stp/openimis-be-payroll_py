@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 from django.db import transaction
 from rest_framework import views
@@ -49,13 +50,24 @@ def _bistp_service_username():
     return su or 'admin'
 
 
+def _payroll_id_from_transaction_id(transaction_id):
+    # transaction_id enviado: "<uuid do payroll sem hífens>-<hash>"; pedidos antigos: "<uuid>-<chunk>"
+    transaction_id = transaction_id or ''
+    try:
+        if len(transaction_id) >= 36 and transaction_id[8] == '-':
+            return str(uuid.UUID(transaction_id[:36]))
+        return str(uuid.UUID(transaction_id[:32]))
+    except ValueError:
+        logger.warning("[BISTP][Callback] transaction_id inválido: %s", transaction_id)
+        return None
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 @bistp_callback_auth
 def bistp_payment_status_callback(request):
-    # O transaction_id enviado é "<payroll_uuid>-<chunk>-<hash>"; o payroll é o UUID inicial
-    payroll_id = (request.data.get('transaction_id') or '')[:36]
+    payroll_id = _payroll_id_from_transaction_id(request.data.get('transaction_id'))
     payment_statuses = request.data.get('payment_statuses', [])
 
     logger.info("BISTP callback recebido: payroll_id=%s, %d items", payroll_id, len(payment_statuses))

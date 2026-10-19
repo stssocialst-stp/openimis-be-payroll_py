@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import date
 
 import requests
@@ -111,13 +112,18 @@ class BistpGatewayConnector(PaymentGatewayConnector):
 
     BATCH_SIZE = 100
 
-    @staticmethod
-    def _chunk_transaction_id(batch_id, chunk_num, chunk):
+    TRANSACTION_ID_MAX_LENGTH = 40
+
+    @classmethod
+    def _chunk_transaction_id(cls, batch_id, chunk):
         # O BISTP só aceita repetir um transaction_id com exactamente o mesmo conteúdo (e só se falhou);
         # conteúdo diferente (ex.: payment_date alterada) exige identificador novo. O hash do conteúdo
         # mantém o id num reenvio igual e muda-o quando algum dado do chunk muda.
-        digest = hashlib.sha256(json.dumps(chunk, sort_keys=True).encode('utf-8')).hexdigest()[:8]
-        return f"{batch_id}-{chunk_num}-{digest}"
+        # Formato (máx. 40 caracteres no BISTP): <uuid do payroll sem hífens (32)>-<hash (7)>
+        digest = hashlib.sha256(json.dumps(chunk, sort_keys=True).encode('utf-8')).hexdigest()[:7]
+        transaction_id = f"{uuid.UUID(str(batch_id)).hex}-{digest}"
+        assert len(transaction_id) <= cls.TRANSACTION_ID_MAX_LENGTH
+        return transaction_id
 
     def send_payment_batch(self, batch_id, payments):
         """Envia em chunks e devolve os índices (em `payments`) dos pagamentos de chunks aceites."""
@@ -130,7 +136,8 @@ class BistpGatewayConnector(PaymentGatewayConnector):
         for chunk_start in range(0, total, self.BATCH_SIZE):
             chunk = payments[chunk_start:chunk_start + self.BATCH_SIZE]
             chunk_num = chunk_start // self.BATCH_SIZE + 1
-            chunk_id = self._chunk_transaction_id(batch_id, chunk_num, chunk)
+            chunk_id = self._chunk_transaction_id(batch_id, chunk)
+            logger.info("[BISTP][Batch] chunk %d → transaction_id=%s", chunk_num, chunk_id)
             payload = {"transaction_id": chunk_id, "payments": chunk}
             if self._send_chunk(url, chunk_id, chunk, payload):
                 accepted.extend(range(chunk_start, chunk_start + len(chunk)))

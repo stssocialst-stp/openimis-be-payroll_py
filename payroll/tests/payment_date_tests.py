@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 from payroll.models import PayrollStatus
 from payroll.payment_gateway.bistp_gateway_connector import BistpGatewayConnector
 from payroll.strategies.strategy_bistp_payment import StrategyBistpPayment
+from payroll.views import _payroll_id_from_transaction_id
 from payroll.validation import validate_payment_date, validate_payment_date_update, BISTP_PAYMENT_METHOD
 
 TODAY = datetime.date.today()
@@ -124,19 +125,25 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
 
 
 class BistpTransactionIdTest(SimpleTestCase):
+    PAYROLL_ID = 'df2a00df-ef7c-4c29-821c-fae4acbedc0e'
 
     def _chunk(self, payment_date):
         return [{'household_id': 'ind-1', 'nib_number': 'ST1', 'amount': '1500.00',
                  'payment_date': payment_date, 'currency': 'STN', 'programme_name': 'Cash Distribution'}]
 
+    def _transaction_id(self, payment_date):
+        return BistpGatewayConnector._chunk_transaction_id(self.PAYROLL_ID, self._chunk(payment_date))
+
+    def test_transaction_id_fits_bistp_limit(self):
+        self.assertLessEqual(len(self._transaction_id('2026-10-19')), 40)
+
     def test_same_content_keeps_transaction_id(self):
-        self.assertEqual(
-            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
-            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
-        )
+        self.assertEqual(self._transaction_id('2026-10-18'), self._transaction_id('2026-10-18'))
 
     def test_changed_payment_date_changes_transaction_id(self):
-        self.assertNotEqual(
-            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
-            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-19')),
-        )
+        self.assertNotEqual(self._transaction_id('2026-10-18'), self._transaction_id('2026-10-19'))
+
+    def test_callback_resolves_payroll_from_transaction_id(self):
+        self.assertEqual(_payroll_id_from_transaction_id(self._transaction_id('2026-10-19')), self.PAYROLL_ID)
+        self.assertEqual(_payroll_id_from_transaction_id(f'{self.PAYROLL_ID}-7'), self.PAYROLL_ID)
+        self.assertIsNone(_payroll_id_from_transaction_id('invalido'))
