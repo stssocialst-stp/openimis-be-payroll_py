@@ -5,6 +5,7 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from payroll.models import PayrollStatus
+from payroll.payment_gateway.bistp_gateway_connector import BistpGatewayConnector
 from payroll.strategies.strategy_bistp_payment import StrategyBistpPayment
 from payroll.validation import validate_payment_date, validate_payment_date_update, BISTP_PAYMENT_METHOD
 
@@ -71,8 +72,8 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
         return payments[0]['payment_date']
 
     def test_sends_and_records_payroll_payment_date(self, get_benefits, approve):
-        get_benefits.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = True
+        get_benefits.return_value.order_by.return_value = [self.benefit]
+        self.gateway.send_payment_batch.return_value = [0]
         payroll = self._payroll(TOMORROW)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -83,8 +84,8 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
         payroll.save.assert_not_called()
 
     def test_falls_back_to_today_and_records_on_payroll(self, get_benefits, approve):
-        get_benefits.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = True
+        get_benefits.return_value.order_by.return_value = [self.benefit]
+        self.gateway.send_payment_batch.return_value = [0]
         payroll = self._payroll(None)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -95,8 +96,8 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
         self.assertEqual(self.benefit.payment_date, TODAY)
 
     def test_failed_batch_does_not_record_payment_date(self, get_benefits, approve):
-        get_benefits.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = False
+        get_benefits.return_value.order_by.return_value = [self.benefit]
+        self.gateway.send_payment_batch.return_value = []
         payroll = self._payroll(None)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -105,3 +106,37 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
         self.assertIsNone(payroll.payment_date)
         payroll.save.assert_not_called()
         approve.assert_not_called()
+
+    def test_only_benefits_of_accepted_chunks_are_approved(self, get_benefits, approve):
+        other = mock.Mock(
+            individual=SimpleNamespace(json_ext={'NIB': 'ST999'}),
+            individual_id='ind-2', amount='5000', code='B2', json_ext={}, payment_date=None,
+        )
+        get_benefits.return_value.order_by.return_value = [self.benefit, other]
+        self.gateway.send_payment_batch.return_value = [1]
+
+        StrategyBistpPayment.make_payment_for_payroll(self._payroll(TOMORROW), self.user)
+
+        approve.assert_called_once_with([other], self.user)
+        self.assertEqual(other.payment_date, TOMORROW)
+        self.assertIsNone(self.benefit.payment_date)
+        self.assertEqual(self.benefit.json_ext.get('bistp_skip_reason'), 'batch_falhou')
+
+
+class BistpTransactionIdTest(SimpleTestCase):
+
+    def _chunk(self, payment_date):
+        return [{'household_id': 'ind-1', 'nib_number': 'ST1', 'amount': '1500.00',
+                 'payment_date': payment_date, 'currency': 'STN', 'programme_name': 'Cash Distribution'}]
+
+    def test_same_content_keeps_transaction_id(self):
+        self.assertEqual(
+            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
+            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
+        )
+
+    def test_changed_payment_date_changes_transaction_id(self):
+        self.assertNotEqual(
+            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-18')),
+            BistpGatewayConnector._chunk_transaction_id('p1', 1, self._chunk('2026-10-19')),
+        )

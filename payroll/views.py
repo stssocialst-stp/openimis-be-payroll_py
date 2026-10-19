@@ -54,7 +54,8 @@ def _bistp_service_username():
 @permission_classes([AllowAny])
 @bistp_callback_auth
 def bistp_payment_status_callback(request):
-    payroll_id = request.data.get('transaction_id')
+    # O transaction_id enviado é "<payroll_uuid>-<chunk>-<hash>"; o payroll é o UUID inicial
+    payroll_id = (request.data.get('transaction_id') or '')[:36]
     payment_statuses = request.data.get('payment_statuses', [])
 
     logger.info("BISTP callback recebido: payroll_id=%s, %d items", payroll_id, len(payment_statuses))

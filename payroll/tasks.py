@@ -26,6 +26,12 @@ def _write_temp_file(content_b64, suffix, prefix):
         tmp.close()
 
 
+def _load_payroll(payroll_id):
+    # Payroll.objects.get usa a cache do core (LocMemCache por processo, sem expiração): o worker
+    # não vê alterações gravadas pela API (ex.: payment_date) e voltaria a gravar o objecto antigo
+    return Payroll.objects.filter(id=payroll_id).get()
+
+
 def _update_mutation_log(client_mutation_id, status, error=None, json_ext=None):
     try:
         from core.models import MutationLog
@@ -191,7 +197,7 @@ def generate_payroll_benefits_task(self, payroll_id, user_id):
     """
     try:
         from payroll.services import PayrollService
-        payroll = Payroll.objects.get(id=payroll_id)
+        payroll = _load_payroll(payroll_id)
         user = User.objects.get(id=user_id)
         service = PayrollService(user)
         service._finalize_payroll_async(payroll)
@@ -203,7 +209,7 @@ def generate_payroll_benefits_task(self, payroll_id, user_id):
 
 @shared_task
 def send_requests_to_gateway_payment(payroll_id, user_id):
-    payroll = Payroll.objects.get(id=payroll_id)
+    payroll = _load_payroll(payroll_id)
     strategy = PaymentMethodStorage.get_chosen_payment_method(payroll.payment_method)
     if strategy:
         user = User.objects.get(id=user_id)
@@ -213,7 +219,7 @@ def send_requests_to_gateway_payment(payroll_id, user_id):
 
 @shared_task
 def send_request_to_reconcile(payroll_id, user_id):
-    payroll = Payroll.objects.get(id=payroll_id)
+    payroll = _load_payroll(payroll_id)
     user = User.objects.get(id=user_id)
     strategy = StrategyOnlinePayment
     strategy.initialize_payment_gateway()

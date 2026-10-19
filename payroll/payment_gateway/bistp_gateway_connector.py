@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import os
 import time
@@ -109,23 +111,32 @@ class BistpGatewayConnector(PaymentGatewayConnector):
 
     BATCH_SIZE = 100
 
+    @staticmethod
+    def _chunk_transaction_id(batch_id, chunk_num, chunk):
+        # O BISTP só aceita repetir um transaction_id com exactamente o mesmo conteúdo (e só se falhou);
+        # conteúdo diferente (ex.: payment_date alterada) exige identificador novo. O hash do conteúdo
+        # mantém o id num reenvio igual e muda-o quando algum dado do chunk muda.
+        digest = hashlib.sha256(json.dumps(chunk, sort_keys=True).encode('utf-8')).hexdigest()[:8]
+        return f"{batch_id}-{chunk_num}-{digest}"
+
     def send_payment_batch(self, batch_id, payments):
+        """Envia em chunks e devolve os índices (em `payments`) dos pagamentos de chunks aceites."""
         url = f"{self._base_url}{self._api_path}/api/payments/initiate"
         total = len(payments)
         logger.info("[BISTP][Batch] Iniciando batch — batch_id=%s, total=%d pagamentos, chunks=%d",
                     batch_id, total, (total + self.BATCH_SIZE - 1) // self.BATCH_SIZE)
 
-        all_ok = True
+        accepted = []
         for chunk_start in range(0, total, self.BATCH_SIZE):
             chunk = payments[chunk_start:chunk_start + self.BATCH_SIZE]
             chunk_num = chunk_start // self.BATCH_SIZE + 1
-            chunk_id = f"{batch_id}-{chunk_num}"
+            chunk_id = self._chunk_transaction_id(batch_id, chunk_num, chunk)
             payload = {"transaction_id": chunk_id, "payments": chunk}
-            chunk_ok = self._send_chunk(url, chunk_id, chunk, payload)
-            if not chunk_ok:
-                all_ok = False
+            if self._send_chunk(url, chunk_id, chunk, payload):
+                accepted.extend(range(chunk_start, chunk_start + len(chunk)))
 
-        return all_ok
+        logger.info("[BISTP][Batch] batch_id=%s — %d/%d pagamentos aceites", batch_id, len(accepted), total)
+        return accepted
 
     def _send_chunk(self, url, chunk_id, chunk, payload):
         logger.info(

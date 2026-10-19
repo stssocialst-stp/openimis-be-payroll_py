@@ -1,3 +1,5 @@
 from payroll.tests.payment_point_gql_tests import PaymentPointGQLTestCase
 from payroll.tests.payroll_gql_tests import PayrollGQLTestCase
-from payroll.tests.payment_date_tests import PaymentDateValidationTest, BistpPaymentDateStrategyTest
+from payroll.tests.payment_date_tests import (
+    PaymentDateValidationTest, BistpPaymentDateStrategyTest, BistpTransactionIdTest
+)
