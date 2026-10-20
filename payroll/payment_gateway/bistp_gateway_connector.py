@@ -126,26 +126,42 @@ class BistpGatewayConnector(PaymentGatewayConnector):
         return transaction_id
 
     def send_payment_batch(self, batch_id, payments):
-        """Envia em chunks e devolve os índices (em `payments`) dos pagamentos de chunks aceites."""
+        """
+        Envia em chunks e devolve (aceites, recusados):
+          aceites   — índices (em `payments`) dos pagamentos com status Success no BISTP
+          recusados — {índice: motivo} dos pagamentos recusados pelo BISTP num chunk respondido com 200
+        Pagamentos de chunks sem resposta 200 não aparecem em nenhum dos dois.
+        """
         url = f"{self._base_url}{self._api_path}/api/payments/initiate"
         total = len(payments)
         logger.info("[BISTP][Batch] Iniciando batch — batch_id=%s, total=%d pagamentos, chunks=%d",
                     batch_id, total, (total + self.BATCH_SIZE - 1) // self.BATCH_SIZE)
 
         accepted = []
+        rejected = {}
         for chunk_start in range(0, total, self.BATCH_SIZE):
             chunk = payments[chunk_start:chunk_start + self.BATCH_SIZE]
             chunk_num = chunk_start // self.BATCH_SIZE + 1
             chunk_id = self._chunk_transaction_id(batch_id, chunk)
             logger.info("[BISTP][Batch] chunk %d → transaction_id=%s", chunk_num, chunk_id)
             payload = {"transaction_id": chunk_id, "payments": chunk}
-            if self._send_chunk(url, chunk_id, chunk, payload):
-                accepted.extend(range(chunk_start, chunk_start + len(chunk)))
+            chunk_rejections = self._send_chunk(url, chunk_id, chunk, payload)
+            if chunk_rejections is None:
+                continue
+            # Num chunk com 200 o BISTP cria as ordens dos pagamentos Success, mesmo que outros sejam recusados
+            for offset, payment in enumerate(chunk):
+                reason = chunk_rejections.get(payment['household_id'])
+                if reason is None:
+                    accepted.append(chunk_start + offset)
+                else:
+                    rejected[chunk_start + offset] = reason
 
-        logger.info("[BISTP][Batch] batch_id=%s — %d/%d pagamentos aceites", batch_id, len(accepted), total)
-        return accepted
+        logger.info("[BISTP][Batch] batch_id=%s — %d/%d pagamentos aceites, %d recusados",
+                    batch_id, len(accepted), total, len(rejected))
+        return accepted, rejected
 
     def _send_chunk(self, url, chunk_id, chunk, payload):
+        """Devolve {household_id: motivo} dos pagamentos recusados se o BISTP respondeu 200, senão None."""
         logger.info(
             "[BISTP][Batch] === A ENVIAR CHUNK ===\n"
             "  chunk_id:   %s\n"
@@ -186,7 +202,7 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                     else:
                         logger.info("[BISTP][Batch] chunk_id=%s — todos %d pagamentos aceites",
                                     chunk_id, len(chunk))
-                    return len(errors) == 0
+                    return {e.get('household_id'): e.get('message') or e.get('status') or 'erro' for e in errors}
 
                 if response.status_code == 401:
                     logger.warning("[BISTP][Batch] chunk_id=%s → 401 — a invalidar token e retry", chunk_id)
@@ -196,7 +212,7 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                 if response.status_code < 500:
                     logger.error("[BISTP][Batch] chunk_id=%s → HTTP %s (sem retry) body=%s",
                                  chunk_id, response.status_code, response.text[:500])
-                    return False
+                    return None
 
                 logger.warning("[BISTP][Batch] chunk_id=%s → HTTP %s (tentativa %d/3) body=%s",
                                chunk_id, response.status_code, attempt + 1, response.text[:300])
@@ -205,15 +221,15 @@ class BistpGatewayConnector(PaymentGatewayConnector):
                 logger.warning("[BISTP][Batch] chunk_id=%s → Timeout (tentativa %d/3)", chunk_id, attempt + 1)
             except requests.ConnectionError as exc:
                 logger.error("[BISTP][Batch] chunk_id=%s → Erro de ligação: %s", chunk_id, exc)
-                return False
+                return None
             except Exception:
                 logger.exception("[BISTP][Batch] chunk_id=%s → Erro inesperado", chunk_id)
-                return False
+                return None
 
             time.sleep(2 ** attempt)
 
         logger.error("[BISTP][Batch] chunk_id=%s → FALHOU após 3 tentativas", chunk_id)
-        return False
+        return None
 
     def get_account_info(self, nib):
         url = f"{self._base_url}{self._api_path}/api/accounts/info"

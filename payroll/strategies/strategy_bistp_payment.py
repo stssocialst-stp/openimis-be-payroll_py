@@ -95,11 +95,14 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
             logger.warning("[BISTP][Strategy] Payroll %s — sem pagamentos válidos para enviar", payroll.id)
             return
 
-        accepted_indexes = set(cls.PAYMENT_GATEWAY.send_payment_batch(str(payroll.id), batch_payments))
-        # Chunks aceites já criaram ordens de pagamento no BISTP: têm de sair de ACCEPTED mesmo que
-        # outros chunks falhem, senão o próximo envio repete-os
+        accepted_indexes, rejected = cls.PAYMENT_GATEWAY.send_payment_batch(str(payroll.id), batch_payments)
+        accepted_indexes = set(accepted_indexes)
+        # Pagamentos aceites já criaram ordens de pagamento no BISTP: têm de sair de ACCEPTED mesmo que
+        # outros falhem, senão o próximo envio repete-os
         sent_benefits = [b for i, b in enumerate(approved_benefits) if i in accepted_indexes]
-        failed_benefits = [b for i, b in enumerate(approved_benefits) if i not in accepted_indexes]
+        rejected_benefits = [(b, rejected[i]) for i, b in enumerate(approved_benefits) if i in rejected]
+        failed_benefits = [b for i, b in enumerate(approved_benefits)
+                           if i not in accepted_indexes and i not in rejected]
 
         if sent_benefits:
             if payroll.payment_date is None:
@@ -109,24 +112,36 @@ class StrategyBistpPayment(StrategyOfPaymentInterface):
                 benefit.payment_date = payment_date
             StrategyOnlinePayment.approve_for_payment_benefit_consumption(sent_benefits, user)
 
-        if not failed_benefits:
-            logger.info("[BISTP][Strategy] ====== FIM — Payroll %s — batch aceite, %d → APPROVE_FOR_PAYMENT ======",
-                        payroll.id, len(sent_benefits))
-        else:
-            for benefit in failed_benefits:
-                json_ext = benefit.json_ext or {}
-                if json_ext.get('bistp_skip_reason') == 'batch_falhou':
-                    continue
-                json_ext['bistp_skip_reason'] = 'batch_falhou'
-                benefit.json_ext = json_ext
-                try:
-                    benefit.save(username=user.username)
-                except Exception:
-                    logger.warning("[BISTP][Strategy] Não foi possível guardar bistp_skip_reason para benefit %s",
-                                   benefit.code)
-            logger.error("[BISTP][Strategy] ====== FIM — Payroll %s — %d → APPROVE_FOR_PAYMENT, "
-                         "%d mantidos em ACCEPTED (chunks falhados) ======",
-                         payroll.id, len(sent_benefits), len(failed_benefits))
+        # Recusados pelo BISTP (ex.: conta bloqueada/encerrada): mesmo tratamento do callback de recusa
+        for benefit, reason in rejected_benefits:
+            json_ext = benefit.json_ext or {}
+            json_ext.pop('bistp_skip_reason', None)
+            json_ext['bistp_rejection_reason'] = reason
+            benefit.json_ext = json_ext
+            benefit.status = BenefitConsumptionStatus.REJECTED
+            try:
+                benefit.save(username=user.username)
+            except Exception:
+                logger.warning("[BISTP][Strategy] Não foi possível marcar benefit %s como REJECTED", benefit.code)
+            logger.warning("[BISTP][Strategy] Benefício %s (individual %s) recusado pelo BISTP: %s",
+                           benefit.code, benefit.individual_id, reason)
+
+        for benefit in failed_benefits:
+            json_ext = benefit.json_ext or {}
+            if json_ext.get('bistp_skip_reason') == 'batch_falhou':
+                continue
+            json_ext['bistp_skip_reason'] = 'batch_falhou'
+            benefit.json_ext = json_ext
+            try:
+                benefit.save(username=user.username)
+            except Exception:
+                logger.warning("[BISTP][Strategy] Não foi possível guardar bistp_skip_reason para benefit %s",
+                               benefit.code)
+
+        log = logger.error if failed_benefits else logger.info
+        log("[BISTP][Strategy] ====== FIM — Payroll %s — %d → APPROVE_FOR_PAYMENT, %d → REJECTED (recusados "
+            "pelo BISTP), %d mantidos em ACCEPTED (chunks falhados) ======",
+            payroll.id, len(sent_benefits), len(rejected_benefits), len(failed_benefits))
 
     @classmethod
     def reconcile_payroll(cls, payroll, user):

@@ -74,7 +74,7 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
 
     def test_sends_and_records_payroll_payment_date(self, get_benefits, approve):
         get_benefits.return_value.order_by.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = [0]
+        self.gateway.send_payment_batch.return_value = ([0], {})
         payroll = self._payroll(TOMORROW)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -86,7 +86,7 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
 
     def test_falls_back_to_today_and_records_on_payroll(self, get_benefits, approve):
         get_benefits.return_value.order_by.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = [0]
+        self.gateway.send_payment_batch.return_value = ([0], {})
         payroll = self._payroll(None)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -98,7 +98,7 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
 
     def test_failed_batch_does_not_record_payment_date(self, get_benefits, approve):
         get_benefits.return_value.order_by.return_value = [self.benefit]
-        self.gateway.send_payment_batch.return_value = []
+        self.gateway.send_payment_batch.return_value = ([], {})
         payroll = self._payroll(None)
 
         StrategyBistpPayment.make_payment_for_payroll(payroll, self.user)
@@ -114,7 +114,7 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
             individual_id='ind-2', amount='5000', code='B2', json_ext={}, payment_date=None,
         )
         get_benefits.return_value.order_by.return_value = [self.benefit, other]
-        self.gateway.send_payment_batch.return_value = [1]
+        self.gateway.send_payment_batch.return_value = ([1], {})
 
         StrategyBistpPayment.make_payment_for_payroll(self._payroll(TOMORROW), self.user)
 
@@ -123,6 +123,21 @@ class BistpPaymentDateStrategyTest(SimpleTestCase):
         self.assertIsNone(self.benefit.payment_date)
         self.assertEqual(self.benefit.json_ext.get('bistp_skip_reason'), 'batch_falhou')
 
+
+    def test_payment_rejected_by_bistp_is_marked_rejected(self, get_benefits, approve):
+        other = mock.Mock(
+            individual=SimpleNamespace(json_ext={'NIB': 'ST999'}),
+            individual_id='ind-2', amount='5000', code='B2', json_ext={}, payment_date=None,
+        )
+        get_benefits.return_value.order_by.return_value = [self.benefit, other]
+        self.gateway.send_payment_batch.return_value = ([0], {1: 'Conta com bloqueios'})
+
+        StrategyBistpPayment.make_payment_for_payroll(self._payroll(TOMORROW), self.user)
+
+        approve.assert_called_once_with([self.benefit], self.user)
+        self.assertEqual(other.status, 'REJECTED')
+        self.assertEqual(other.json_ext['bistp_rejection_reason'], 'Conta com bloqueios')
+        self.assertIsNone(other.payment_date)
 
 class BistpTransactionIdTest(SimpleTestCase):
     PAYROLL_ID = 'df2a00df-ef7c-4c29-821c-fae4acbedc0e'
@@ -147,3 +162,22 @@ class BistpTransactionIdTest(SimpleTestCase):
         self.assertEqual(_payroll_id_from_transaction_id(self._transaction_id('2026-10-19')), self.PAYROLL_ID)
         self.assertEqual(_payroll_id_from_transaction_id(f'{self.PAYROLL_ID}-7'), self.PAYROLL_ID)
         self.assertIsNone(_payroll_id_from_transaction_id('invalido'))
+
+
+class BistpBatchResultTest(SimpleTestCase):
+
+    def _connector(self, responses):
+        connector = BistpGatewayConnector.__new__(BistpGatewayConnector)
+        connector._base_url, connector._api_path = 'http://bistp', '/api'
+        connector._send_chunk = mock.Mock(side_effect=responses)
+        return connector
+
+    def _payments(self, n):
+        return [{'household_id': f'h{i}', 'payment_date': '2026-10-19'} for i in range(n)]
+
+    def test_success_rejected_and_failed_chunks(self):
+        connector = self._connector([{'h1': 'Conta encerrada'}, None])
+        connector.BATCH_SIZE = 2
+        accepted, rejected = connector.send_payment_batch('df2a00df-ef7c-4c29-821c-fae4acbedc0e', self._payments(4))
+        self.assertEqual(accepted, [0])
+        self.assertEqual(rejected, {1: 'Conta encerrada'})
