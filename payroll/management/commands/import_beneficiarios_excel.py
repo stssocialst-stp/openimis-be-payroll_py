@@ -6,19 +6,50 @@ completo de criação de dados:
 
   Fase 1 (sempre):
     - Criar ou actualizar Individual (nome, data_n, sexo, BI, NIB, PAN, etc.)
-    - Criar ou actualizar Group (agregado_id como code)
+    - Criar ou actualizar Group (agregado_id/NIA como code)
     - Criar ou actualizar GroupIndividual (HEAD + PRIMARY)
 
   Fase 2 (--benefit-plan-id):
-    - Criar Beneficiary (ligação Individual→BenefitPlan, status ACTIVE)
+    - BenefitPlan GROUP      → GroupBeneficiary (Group→BenefitPlan, status ACTIVE)
+    - BenefitPlan INDIVIDUAL → Beneficiary (Individual→BenefitPlan, status ACTIVE)
+    - Só para registos com NIB válido
 
   Fase 3 (--payroll-id):
-    - Criar BenefitConsumption (amount=valor, status=ACCEPTED)
+    - Criar BenefitConsumption (amount=valor, status=ACCEPTED) — só com NIB válido
     - Criar PayrollBenefitConsumption (ligar ao Payroll)
 
+Agregado já importado do CSU 2026 (import_csu_2026):
+    O Group com code = NIA tem json_ext.csu2026_agregado. O titular é procurado entre os membros
+    (BI, depois nome) e não se criam pessoas: grava-se o NIB/PAN/subconta, o titular passa a
+    destinatário principal (PRIMARY) e seguem as Fases 2 e 3. INDEX diferente do CSU ou titular
+    fora da composição do agregado → CONFLITO.
+
+--correcoes: CSV de correcções DPSSF; as linhas INDEX_LISTA corrigem o INDEX CSU2026 da lista.
+BI repetido no ficheiro: as linhas são importadas como pessoas distintas e sinalizadas.
+
+Agregado que não veio do CSU — correspondência com registos existentes (hierarquia):
+    1. INDEX CSU2026  (json_ext.index_csu2026)
+    2. NIA            (json_ext.agregado_id)
+    3. BI             (json_ext.bilhete_didentidade)
+  Se os identificadores apontarem para Individuals diferentes, se o registo
+  encontrado tiver NIA/INDEX/BI diferente do Excel, ou se o agregado já tiver
+  outro chefe, a linha NÃO é alterada e fica no relatório de conflitos.
+  O NIA de um registo existente nunca é alterado.
+
+Identificadores (NIA, BI, PAN, subconta, NIB, INDEX CSU2026) são tratados como
+texto. Se a célula estiver formatada como número no Excel é emitido um aviso; se
+o valor numérico já perdeu precisão (>= 15 dígitos) a linha é rejeitada.
+
+O --dry-run executa todas as fases em simulação (incluindo 2 e 3) e lista
+conflitos, registos sem NIB e avisos de formatação, sem gravar nada.
+
 Uso:
-    # Só indivíduos e grupos (dry-run)
-    python manage.py import_beneficiarios_excel /path/lista.xlsx --dry-run
+    # Simulação completa
+    python manage.py import_beneficiarios_excel /path/lista.xlsx --dry-run \\
+        --benefit-plan-id <uuid> --payroll-id <uuid>
+
+    # Só Fase 1 (indivíduos e agregados)
+    python manage.py import_beneficiarios_excel /path/lista.xlsx --username admin
 
     # Fluxo completo
     python manage.py import_beneficiarios_excel /path/lista.xlsx \\
@@ -31,25 +62,39 @@ Colunas esperadas no Excel:
     sexo_chefe, data_n, bilhete_didentidade, pan, subconta, NIBs, valor, Situação, INDEX CSU2026
 """
 import logging
-import uuid
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
+
+from payroll import csu2026
+from payroll.csu2026 import normalize_key, normalize_name
 
 logger = logging.getLogger(__name__)
 
-DISTRICT_ALIASES = {
-    'ÁGUA GRANDE': ['AGUA GRANDE', 'ÁGUA GRANDE'],
-    'MÉZOCHI': ['MEZOCHI', 'MÉZOCHI'],
-    'CANTAGALO': ['CANTAGALO'],
-    'LEMBÁ': ['LEMBA', 'LEMBÁ'],
-    'LOBATA': ['LOBATA'],
-    'CAUÉ': ['CAUE', 'CAUÉ'],
-    'PAGUÉ': ['PAGUE', 'PAGUÉ'],
+# Colunas tratadas como identificadores (texto) → nome usado nos relatórios
+ID_COLUMNS = {
+    'agregado_id': 'NIA',
+    'bilhete_didentidade': 'BI',
+    'pan': 'PAN',
+    'subconta': 'subconta',
+    'NIBs': 'NIB',
+    'INDEX CSU2026': 'INDEX CSU2026',
 }
+
+# Um double só representa inteiros exactos até 15 dígitos
+MAX_EXACT_FLOAT = 10 ** 15
+
+
+class _DryRunRollback(Exception):
+    pass
+
+
+class _RowConflict(Exception):
+    pass
 
 
 class Command(BaseCommand):
@@ -65,11 +110,13 @@ class Command(BaseCommand):
         parser.add_argument('--sheet', type=str, default=None,
                             help='Nome da sheet (default: primeira sheet)')
         parser.add_argument('--benefit-plan-id', type=str, default=None,
-                            help='UUID do BenefitPlan — activa Fase 2 (Beneficiary)')
+                            help='UUID do BenefitPlan — activa Fase 2 (Beneficiary/GroupBeneficiary)')
         parser.add_argument('--payroll-id', type=str, default=None,
                             help='UUID do Payroll — activa Fase 3 (BenefitConsumption)')
         parser.add_argument('--benefit-type', type=str, default='CASH',
                             help='Tipo de benefício para BenefitConsumption (default: CASH)')
+        parser.add_argument('--correcoes', type=str, default=None,
+                            help='CSV de correcções DPSSF; usa as linhas INDEX_LISTA (INDEX errado → correcto)')
 
     def handle(self, *args, **options):
         try:
@@ -77,9 +124,7 @@ class Command(BaseCommand):
         except ImportError:
             raise CommandError("openpyxl não instalado. Execute: pip install openpyxl")
 
-        from individual.models import Individual, Group, GroupIndividual
-        from location.models import Location
-        from payroll.models import BenefitConsumption, BenefitConsumptionStatus, PayrollBenefitConsumption, Payroll
+        from payroll.models import Payroll
 
         excel_path = Path(options['excel_path'])
         if not excel_path.exists():
@@ -118,14 +163,23 @@ class Command(BaseCommand):
             try:
                 from social_protection.models import BenefitPlan
                 benefit_plan = BenefitPlan.objects.get(id=benefit_plan_id, is_deleted=False)
-                self.stdout.write(f"[import] BenefitPlan encontrado: {benefit_plan.name}")
+                self.stdout.write(f"[import] BenefitPlan encontrado: {benefit_plan.name} ({benefit_plan.type})")
             except ImportError:
                 raise CommandError("Módulo social_protection não disponível")
             except Exception:
                 raise CommandError(f"BenefitPlan não encontrado: {benefit_plan_id}")
 
+        index_fixes = {}
+        # .get: a tarefa Celery chama handle() directamente, sem esta opção
+        correcoes_path = options.get('correcoes')
+        if correcoes_path:
+            try:
+                index_fixes = csu2026.list_index_corrections(csu2026.load_corrections(correcoes_path))
+            except csu2026.CsuFileError as exc:
+                raise CommandError(str(exc))
+
         # Pré-carregar localidades
-        location_cache = self._build_location_cache()
+        location_cache = csu2026.build_district_cache()
 
         # Ler Excel
         wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
@@ -153,16 +207,25 @@ class Command(BaseCommand):
         stats = {
             'total': 0,
             'ind_created': 0, 'ind_updated': 0,
-            'group_created': 0, 'group_updated': 0,
+            'group_created': 0,
             'gi_created': 0,
-            'benef_created': 0,
+            'benef_created': 0, 'benef_reactivated': 0,
             'bc_created': 0,
+            'titular_csu': 0, 'primary_changed': 0,
+            'conflicts': [],
+            'correcoes': [],
+            'bi_repetido': [],
+            'sem_nib': [],
+            'warnings': [],
             'errors': [],
         }
 
         # Individuals já usados por uma linha deste ficheiro: o mesmo BI em linhas diferentes
         # (outro agregado) dá origem a pessoas distintas em vez de sobrescrever a anterior
         claimed_ids = set()
+
+        # Identificadores já vistos neste ficheiro (detectar duplicados no Excel)
+        seen = {'INDEX CSU2026': {}, 'NIA': {}, 'BI': {}}
 
         for line_num, row in enumerate(rows[1:], start=2):
             if all(v is None for v in row):
@@ -172,115 +235,207 @@ class Command(BaseCommand):
 
             nome_chefe = str(col(row, 'nome_chefe', '')).strip()
             distrito = str(col(row, 'distrito', '')).strip().upper()
-            agregado_id = str(col(row, 'agregado_id', '')).strip()
             sexo = str(col(row, 'sexo_chefe', '')).strip().upper()
             data_n_raw = col(row, 'data_n')
-            bi_raw = col(row, 'bilhete_didentidade')
-            pan = str(col(row, 'pan', '')).strip()
-            subconta = str(col(row, 'subconta', '')).strip()
-            nib = str(col(row, 'NIBs', '')).strip()
             valor_raw = col(row, 'valor')
             categoria = str(col(row, 'categoria_eligibilidade', '')).strip()
-            index_csu = str(col(row, 'INDEX CSU2026', '')).strip()
+
+            # Identificadores como texto
+            ids = {}
+            lossy = []
+            for column, label in ID_COLUMNS.items():
+                text, numeric, lost = self._as_text(col(row, column))
+                ids[column] = text
+                if lost:
+                    lossy.append(f"{label} (valor lido: {text})")
+                elif numeric:
+                    stats['warnings'].append(
+                        f"Linha {line_num}: {label} formatado como número no Excel (lido: {text}) "
+                        f"— confirmar que não perdeu zeros à esquerda"
+                    )
+
+            agregado_id = ids['agregado_id']
+            bi_str = ids['bilhete_didentidade'] or None
+            pan = ids['pan']
+            subconta = ids['subconta']
+            nib = ids['NIBs']
+            index_csu = ids['INDEX CSU2026']
 
             if not nome_chefe or not agregado_id:
                 stats['errors'].append(f"Linha {line_num}: nome ou agregado_id em falta — ignorado")
                 continue
 
+            if lossy:
+                stats['errors'].append(
+                    f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — célula numérica com perda de "
+                    f"precisão em {', '.join(lossy)}. Formatar a coluna como Texto no Excel — ignorado"
+                )
+                continue
+
+            if index_csu in index_fixes:
+                fix = index_fixes[index_csu]
+                stats['correcoes'].append(f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — {fix.describe()}")
+                index_csu = fix.new_value
+
+            duplicated = self._check_duplicates_in_file(
+                seen, line_num, {'INDEX CSU2026': index_csu, 'NIA': agregado_id}
+            )
+            if duplicated:
+                stats['conflicts'].append(f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — {duplicated}")
+                continue
+            # BI repetido: importar e sinalizar, sem fusão (decisão DPSSF de 23/11)
+            repeated_bi = self._check_duplicates_in_file(seen, line_num, {'BI': bi_str})
+            if repeated_bi:
+                stats['bi_repetido'].append(f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — {repeated_bi}")
+
             # Processar campos
             first_name, last_name = self._split_name(nome_chefe)
             dob = self._parse_date(data_n_raw)
-            bi_str = self._normalise_bi(bi_raw)
             amount = self._parse_decimal(valor_raw)
-            location = location_cache.get(distrito)
+            location = location_cache.get(normalize_key(distrito))
+
+            try:
+                # ──────────────────────────────
+                # Correspondência + conflitos (antes de qualquer escrita)
+                # Agregado já importado do CSU → titular entre os membros; senão, hierarquia antiga
+                # ──────────────────────────────
+                resolved = self._resolve_csu_titular(
+                    index_csu=index_csu, agregado_id=agregado_id, bi_str=bi_str, nome=nome_chefe,
+                )
+                csu_titular = resolved is not None
+                if csu_titular:
+                    individual, group = resolved
+                else:
+                    individual, group = self._resolve_existing(
+                        index_csu=index_csu, agregado_id=agregado_id, bi_str=bi_str,
+                        claimed_ids=claimed_ids,
+                    )
+            except _RowConflict as conflict:
+                stats['conflicts'].append(f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — {conflict}")
+                continue
 
             try:
                 with transaction.atomic():
-                    # ──────────────────────────────
-                    # FASE 1A — Individual
-                    # ──────────────────────────────
-                    individual, ind_created = self._get_or_create_individual(
-                        agregado_id=agregado_id,
-                        bi_str=bi_str,
-                        first_name=first_name,
-                        last_name=last_name,
-                        dob=dob,
-                        nib=nib,
-                        sexo=sexo,
-                        pan=pan,
-                        subconta=subconta,
-                        categoria=categoria,
-                        index_csu=index_csu,
-                        location=location,
-                        username=username,
-                        dry_run=dry_run,
-                        claimed_ids=claimed_ids,
-                    )
-                    claimed_ids.add(individual.id)
-
-                    if ind_created:
-                        stats['ind_created'] += 1
-                        action = 'CRIADO'
-                    else:
+                    if csu_titular:
+                        # ──────────────────────────────
+                        # FASE 1 (agregado do CSU) — titular entre os membros, sem criar pessoas
+                        # ──────────────────────────────
+                        self._update_csu_titular(
+                            individual=individual, bi_str=bi_str, dob=dob, nib=nib, pan=pan,
+                            subconta=subconta, categoria=categoria, index_csu=index_csu,
+                            username=username, dry_run=dry_run,
+                        )
                         stats['ind_updated'] += 1
-                        action = 'ACTUALIZADO'
-
-                    self.stdout.write(
-                        f"  {'[DRY] ' if dry_run else ''}Linha {line_num}: {nome_chefe} "
-                        f"(agregado={agregado_id}) → Individual {action}"
-                        + (f" | NIB={nib[:6]}***" if nib else " | SEM NIB")
-                    )
-
-                    # ──────────────────────────────
-                    # FASE 1B — Group
-                    # ──────────────────────────────
-                    group, grp_created = self._get_or_create_group(
-                        agregado_id=agregado_id,
-                        location=location,
-                        username=username,
-                        dry_run=dry_run,
-                    )
-                    if grp_created:
-                        stats['group_created'] += 1
-
-                    # ──────────────────────────────
-                    # FASE 1C — GroupIndividual
-                    # ──────────────────────────────
-                    gi_created = self._ensure_group_individual(
-                        group=group,
-                        individual=individual,
-                        username=username,
-                        dry_run=dry_run,
-                    )
-                    if gi_created:
-                        stats['gi_created'] += 1
-
-                    # ──────────────────────────────
-                    # FASE 2 — Beneficiary
-                    # ──────────────────────────────
-                    if benefit_plan and not dry_run:
-                        benef_created = self._ensure_beneficiary(
-                            individual=individual,
-                            benefit_plan=benefit_plan,
-                            username=username,
+                        stats['titular_csu'] += 1
+                        if self._ensure_primary_recipient(group=group, individual=individual,
+                                                          username=username, dry_run=dry_run):
+                            stats['primary_changed'] += 1
+                        effective_nib = self._effective_nib(individual)
+                        self.stdout.write(
+                            f"  {'[DRY] ' if dry_run else ''}Linha {line_num}: {nome_chefe} "
+                            f"(agregado={agregado_id}) → titular do agregado CSU ACTUALIZADO"
+                            + (f" | NIB={effective_nib[:6]}***" if effective_nib else " | SEM NIB")
                         )
-                        if benef_created:
-                            stats['benef_created'] += 1
-
-                    # ──────────────────────────────
-                    # FASE 3 — BenefitConsumption
-                    # ──────────────────────────────
-                    if payroll and amount is not None and not dry_run:
-                        bc_created = self._ensure_benefit_consumption(
+                    else:
+                        # ──────────────────────────────
+                        # FASE 1A — Individual
+                        # ──────────────────────────────
+                        individual, ind_created = self._create_or_update_individual(
                             individual=individual,
-                            payroll=payroll,
                             agregado_id=agregado_id,
-                            amount=amount,
-                            benefit_type=benefit_type,
+                            bi_str=bi_str,
+                            first_name=first_name,
+                            last_name=last_name,
+                            dob=dob,
+                            nib=nib,
+                            sexo=sexo,
+                            pan=pan,
+                            subconta=subconta,
+                            categoria=categoria,
+                            index_csu=index_csu,
+                            location=location,
                             username=username,
+                            dry_run=dry_run,
                         )
-                        if bc_created:
-                            stats['bc_created'] += 1
+                        claimed_ids.add(individual.id)
+
+                        if ind_created:
+                            stats['ind_created'] += 1
+                            action = 'CRIADO'
+                        else:
+                            stats['ind_updated'] += 1
+                            action = 'ACTUALIZADO'
+
+                        effective_nib = self._effective_nib(individual)
+                        self.stdout.write(
+                            f"  {'[DRY] ' if dry_run else ''}Linha {line_num}: {nome_chefe} "
+                            f"(agregado={agregado_id}) → Individual {action}"
+                            + (f" | NIB={effective_nib[:6]}***" if effective_nib else " | SEM NIB")
+                        )
+
+                        # ──────────────────────────────
+                        # FASE 1B — Group
+                        # ──────────────────────────────
+                        group, grp_created = self._create_or_update_group(
+                            group=group,
+                            agregado_id=agregado_id,
+                            location=location,
+                            username=username,
+                            dry_run=dry_run,
+                        )
+                        if grp_created:
+                            stats['group_created'] += 1
+
+                        # ──────────────────────────────
+                        # FASE 1C — GroupIndividual
+                        # ──────────────────────────────
+                        gi_created = self._ensure_group_individual(
+                            group=group,
+                            individual=individual,
+                            username=username,
+                            dry_run=dry_run,
+                        )
+                        if gi_created:
+                            stats['gi_created'] += 1
+
+                    # Sem NIB o agregado fica registado, mas as Fases 2 e 3 não correm
+                    if not effective_nib:
+                        stats['sem_nib'].append(
+                            f"Linha {line_num}: {nome_chefe} (NIA={agregado_id}) — agregado registado, "
+                            f"não habilitado para pagamento"
+                        )
+                    else:
+                        # ──────────────────────────────
+                        # FASE 2 — Beneficiary / GroupBeneficiary
+                        # ──────────────────────────────
+                        if benefit_plan:
+                            benef_result = self._ensure_beneficiary(
+                                individual=individual,
+                                group=group,
+                                benefit_plan=benefit_plan,
+                                username=username,
+                                dry_run=dry_run,
+                            )
+                            if benef_result == 'created':
+                                stats['benef_created'] += 1
+                            elif benef_result == 'reactivated':
+                                stats['benef_reactivated'] += 1
+
+                        # ──────────────────────────────
+                        # FASE 3 — BenefitConsumption
+                        # ──────────────────────────────
+                        if payroll and amount is not None:
+                            bc_created = self._ensure_benefit_consumption(
+                                individual=individual,
+                                payroll=payroll,
+                                agregado_id=agregado_id,
+                                amount=amount,
+                                benefit_type=benefit_type,
+                                username=username,
+                                dry_run=dry_run,
+                            )
+                            if bc_created:
+                                stats['bc_created'] += 1
 
                     if dry_run:
                         raise _DryRunRollback()
@@ -293,7 +448,13 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f"  {msg}"))
                 logger.exception("[import_beneficiarios_excel] %s", msg)
 
-        # ── Resumo ──
+        self._print_summary(stats, dry_run, benefit_plan_id, payroll_id)
+
+    # ────────────────────────────────────────────────────────
+    # Relatório
+    # ────────────────────────────────────────────────────────
+
+    def _print_summary(self, stats, dry_run, benefit_plan_id, payroll_id):
         self.stdout.write("")
         self.stdout.write("=" * 65)
         self.stdout.write(f"Total processado          : {stats['total']}")
@@ -301,31 +462,39 @@ class Command(BaseCommand):
         self.stdout.write(f"Indivíduos actualizados   : {stats['ind_updated']}")
         self.stdout.write(f"Grupos criados            : {stats['group_created']}")
         self.stdout.write(f"Ligações grupo criadas    : {stats['gi_created']}")
+        self.stdout.write(f"Titulares de agregado CSU : {stats['titular_csu']}")
+        self.stdout.write(f"Destinatário principal mudado: {stats['primary_changed']}")
+        self.stdout.write(f"Correcções DPSSF aplicadas: {len(stats['correcoes'])}")
+        self.stdout.write(f"BI repetido (sinalizado)  : {len(stats['bi_repetido'])}")
         if benefit_plan_id:
             self.stdout.write(f"Beneficiários criados     : {stats['benef_created']}")
+            self.stdout.write(f"Beneficiários reactivados : {stats['benef_reactivated']}")
         if payroll_id:
             self.stdout.write(f"BenefitConsumption criados: {stats['bc_created']}")
+        self.stdout.write(f"Conflitos (não alterados) : {len(stats['conflicts'])}")
+        self.stdout.write(f"Sem NIB (não habilitados) : {len(stats['sem_nib'])}")
+        self.stdout.write(f"Avisos de formatação      : {len(stats['warnings'])}")
+        self.stdout.write(f"Erros                     : {len(stats['errors'])}")
         if dry_run:
             self.stdout.write(self.style.WARNING("MODO DRY-RUN — nenhuma alteração foi guardada"))
-        if stats['errors']:
-            self.stdout.write(self.style.ERROR(f"\nERROS ({len(stats['errors'])}):"))
-            for e in stats['errors']:
-                self.stdout.write(self.style.ERROR(f"  {e}"))
+
+        sections = [
+            ('CONFLITOS — linhas não alteradas, requerem análise', stats['conflicts'], self.style.ERROR),
+            ('CORRECÇÕES DPSSF APLICADAS', stats['correcoes'], self.style.WARNING),
+            ('BI REPETIDO NO FICHEIRO — importado e sinalizado, sem fusão', stats['bi_repetido'], self.style.WARNING),
+            ('SEM NIB VÁLIDO — não habilitados para pagamento', stats['sem_nib'], self.style.WARNING),
+            ('AVISOS DE FORMATAÇÃO', stats['warnings'], self.style.WARNING),
+            ('ERROS', stats['errors'], self.style.ERROR),
+        ]
+        for title, items, style in sections:
+            if items:
+                self.stdout.write(style(f"\n{title} ({len(items)}):"))
+                for item in items:
+                    self.stdout.write(style(f"  {item}"))
 
     # ────────────────────────────────────────────────────────
     # Helpers
     # ────────────────────────────────────────────────────────
-
-    def _build_location_cache(self):
-        from location.models import Location
-        cache = {}
-        for loc in Location.objects.filter(validity_to__isnull=True):
-            name_upper = loc.name.upper() if loc.name else ''
-            cache[name_upper] = loc
-            for canonical, aliases in DISTRICT_ALIASES.items():
-                if name_upper in aliases:
-                    cache[canonical] = loc
-        return cache
 
     def _split_name(self, full_name):
         parts = full_name.strip().split(' ', 1)
@@ -346,12 +515,22 @@ class Command(BaseCommand):
                     pass
         return None
 
-    def _normalise_bi(self, raw):
+    def _as_text(self, raw):
+        """
+        Converte o valor de uma célula-identificador para texto, sem alterar o conteúdo.
+        Devolve (texto, era_numérico, perdeu_precisão).
+        """
         if raw is None:
-            return None
+            return '', False, False
+        if isinstance(raw, bool):
+            return str(raw), False, False
+        if isinstance(raw, int):
+            return str(raw), True, abs(raw) >= MAX_EXACT_FLOAT
         if isinstance(raw, float):
-            return str(int(raw))
-        return str(raw).strip()
+            if raw.is_integer():
+                return str(int(raw)), True, abs(raw) >= MAX_EXACT_FLOAT
+            return str(raw), True, True
+        return str(raw).strip(), False, False
 
     def _parse_decimal(self, raw):
         if raw is None:
@@ -361,36 +540,210 @@ class Command(BaseCommand):
         except InvalidOperation:
             return None
 
-    def _get_or_create_individual(self, *, agregado_id, bi_str, first_name, last_name,
-                                   dob, nib, sexo, pan, subconta, categoria, index_csu,
-                                   location, username, dry_run, claimed_ids):
+    def _check_duplicates_in_file(self, seen, line_num, identifiers):
+        for label, value in identifiers.items():
+            if not value:
+                continue
+            first_line = seen[label].get(value)
+            if first_line:
+                return f"{label} {value} repetido no ficheiro (já na linha {first_line})"
+        for label, value in identifiers.items():
+            if value:
+                seen[label][value] = line_num
+        return None
+
+    def _effective_nib(self, individual):
+        # Mesma ordem usada pelo StrategyBistpPayment no envio
+        json_ext = individual.json_ext or {}
+        nib = json_ext.get('NIB') or json_ext.get('nib') or getattr(individual, 'nib', None)
+        return str(nib).strip() if nib else ''
+
+    def _resolve_csu_titular(self, *, index_csu, agregado_id, bi_str, nome):
+        """
+        Agregado já importado do CSU (json_ext.csu2026_agregado): o titular da lista é procurado
+        entre os membros, por BI e depois pelo nome. Devolve (Individual, Group), ou None quando
+        o agregado não veio do CSU (segue a hierarquia INDEX → NIA → BI).
+        """
+        from individual.models import Group, GroupIndividual
+
+        groups = list(Group.objects.filter(code=agregado_id, is_deleted=False)[:2])
+        if len(groups) > 1:
+            raise _RowConflict(f"existe mais do que um agregado activo com NIA {agregado_id}")
+        if not groups:
+            return None
+        group = groups[0]
+        csu_data = (group.json_ext or {}).get('csu2026_agregado')
+        if not csu_data:
+            return None
+
+        csu_index = csu2026.as_text(csu_data.get('index'))
+        if index_csu and csu_index and csu_index != index_csu:
+            raise _RowConflict(f"INDEX da lista ({index_csu}) diferente do INDEX do agregado no CSU ({csu_index})")
+
+        members = [
+            gi.individual for gi in
+            GroupIndividual.objects.filter(group=group, is_deleted=False).select_related('individual')
+            if not gi.individual.is_deleted
+        ]
+
+        def stored_bi(individual):
+            return csu2026.as_text((individual.json_ext or {}).get('bilhete_didentidade'))
+
+        if bi_str:
+            by_bi = [m for m in members if stored_bi(m) == bi_str]
+            if len(by_bi) == 1:
+                return by_bi[0], group
+            if len(by_bi) > 1:
+                raise _RowConflict(f"BI {bi_str} corresponde a mais do que um membro do agregado")
+
+        wanted = normalize_name(nome)
+        by_name = [
+            m for m in members
+            if normalize_name(f"{m.first_name} {m.last_name}") == wanted
+            and not (bi_str and stored_bi(m) and stored_bi(m) != bi_str)
+        ]
+        if len(by_name) == 1:
+            return by_name[0], group
+        if len(by_name) > 1:
+            raise _RowConflict("o nome corresponde a mais do que um membro do agregado")
+        raise _RowConflict(
+            f"o titular não consta da composição do agregado no CSU (INDEX {csu_index or index_csu})"
+        )
+
+    def _update_csu_titular(self, *, individual, bi_str, dob, nib, pan, subconta, categoria,
+                            index_csu, username, dry_run):
+        """
+        Titular que já veio do CSU: grava os dados de pagamento da lista. Nome, sexo e parentesco
+        ficam os do CSU; a data de nascimento da lista só substitui uma data estimada.
+        """
+        json_ext = dict(individual.json_ext or {})
+        if nib:
+            individual.nib = nib
+            for key in ('NIB', 'nib'):
+                if key in json_ext:
+                    json_ext[key] = nib
+        if pan:
+            json_ext['pan'] = pan
+        if subconta:
+            json_ext['subconta'] = subconta
+        if categoria:
+            json_ext['categoria_eligibilidade'] = categoria
+        if index_csu:
+            json_ext['index_csu2026'] = index_csu
+        if bi_str and not json_ext.get('bilhete_didentidade'):
+            json_ext['bilhete_didentidade'] = bi_str
+
+        csu_member = dict(json_ext.get('csu2026') or {})
+        if dob and csu_member.get('dob_estimada'):
+            individual.dob = dob
+            csu_member['dob_estimada'] = False
+            csu_member['dob_fonte'] = 'lista de pagamento'
+            json_ext['csu2026'] = csu_member
+        individual.json_ext = json_ext
+
+        if not dry_run and individual.is_dirty(check_relationship=True):
+            individual.save(username=username)
+
+    def _ensure_primary_recipient(self, *, group, individual, username, dry_run):
+        """O titular da lista passa a destinatário principal; o serviço do grupo despromove o anterior."""
+        from individual.models import GroupIndividual
+
+        gi = GroupIndividual.objects.filter(group=group, individual=individual, is_deleted=False).first()
+        if gi is None or gi.recipient_type == GroupIndividual.RecipientType.PRIMARY:
+            return False
+        if not dry_run:
+            gi.recipient_type = GroupIndividual.RecipientType.PRIMARY
+            gi.save(username=username)
+        return True
+
+    def _resolve_existing(self, *, index_csu, agregado_id, bi_str, claimed_ids=()):
+        """
+        Procura o Individual e o Group existentes pela hierarquia INDEX CSU2026 → NIA → BI.
+        Levanta _RowConflict sempre que os dados não permitem uma correspondência segura.
+        """
+        from individual.models import Individual, Group, GroupIndividual
+
+        active = Individual.objects.filter(is_deleted=False)
+        lookups = []
+        if index_csu:
+            lookups.append(('INDEX CSU2026', active.filter(json_ext__index_csu2026=index_csu)))
+        if agregado_id:
+            lookups.append(('NIA', active.filter(json_ext__agregado_id=agregado_id)))
+        if bi_str:
+            bi_q = Q(json_ext__bilhete_didentidade=bi_str)
+            if bi_str.isdigit():
+                bi_q |= Q(json_ext__bilhete_didentidade=int(bi_str))
+            # Individuals já atribuídos a outra linha do ficheiro ficam de fora (BI repetido → pessoas distintas)
+            lookups.append(('BI', active.filter(bi_q).exclude(id__in=claimed_ids)))
+
+        matches = {}
+        for label, queryset in lookups:
+            found = list(queryset[:2])
+            if len(found) > 1:
+                raise _RowConflict(f"{label} corresponde a mais do que um Individual no sistema")
+            if found:
+                matches[label] = found[0]
+
+        distinct = {ind.id: ind for ind in matches.values()}
+        if len(distinct) > 1:
+            detail = ', '.join(f"{label}→{ind.first_name} {ind.last_name} ({ind.id})"
+                               for label, ind in matches.items())
+            raise _RowConflict(f"identificadores apontam para Individuals diferentes: {detail}")
+
+        individual = next(iter(distinct.values()), None)
+
+        if individual is not None:
+            stored = individual.json_ext or {}
+            for label, row_value, key in (
+                    ('NIA', agregado_id, 'agregado_id'),
+                    ('INDEX CSU2026', index_csu, 'index_csu2026'),
+                    ('BI', bi_str, 'bilhete_didentidade'),
+            ):
+                stored_value = stored.get(key)
+                if row_value and stored_value not in (None, '') and str(stored_value).strip() != row_value:
+                    raise _RowConflict(
+                        f"Individual existente ({individual.id}) tem {label}={stored_value}, Excel tem {row_value}"
+                    )
+
+            other_group = GroupIndividual.objects.filter(
+                individual=individual, is_deleted=False, group__is_deleted=False,
+            ).exclude(group__code=agregado_id).select_related('group').first()
+            if other_group:
+                raise _RowConflict(
+                    f"Individual existente ({individual.id}) já pertence ao agregado {other_group.group.code}"
+                )
+
+        groups = list(Group.objects.filter(code=agregado_id, is_deleted=False)[:2])
+        if len(groups) > 1:
+            raise _RowConflict(f"existe mais do que um agregado activo com NIA {agregado_id}")
+        group = groups[0] if groups else None
+
+        if group is not None:
+            other_heads = GroupIndividual.objects.filter(
+                group=group, role=GroupIndividual.Role.HEAD, is_deleted=False,
+            )
+            if individual is not None:
+                other_heads = other_heads.exclude(individual=individual)
+            other_head = other_heads.select_related('individual').first()
+            if other_head:
+                head = other_head.individual
+                raise _RowConflict(
+                    f"agregado {agregado_id} já tem outro chefe: {head.first_name} {head.last_name} ({head.id})"
+                )
+
+        return individual, group
+
+    def _create_or_update_individual(self, *, individual, agregado_id, bi_str, first_name, last_name,
+                                     dob, nib, sexo, pan, subconta, categoria, index_csu,
+                                     location, username, dry_run):
         from individual.models import Individual
 
-        individual = None
-        created = False
-
-        # Match 1: json_ext.agregado_id (Individual não tem campo 'code')
-        if agregado_id:
-            individual = Individual.objects.filter(
-                json_ext__agregado_id=agregado_id, is_deleted=False
-            ).first()
-
-        # Match 2: json_ext BI — ignora Individuals já atribuídos a outra linha do ficheiro
-        if individual is None and bi_str:
-            candidates = Individual.objects.filter(is_deleted=False).exclude(id__in=claimed_ids)
-            individual = (
-                candidates.filter(json_ext__bilhete_didentidade=bi_str).first()
-                or candidates.filter(
-                    json_ext__bilhete_didentidade=int(bi_str) if bi_str.isdigit() else None
-                ).first()
-            )
-
-        if individual is None:
+        created = individual is None
+        if created:
             individual = Individual(
                 first_name=first_name,
                 last_name=last_name,
             )
-            created = True
 
         # Actualizar campos
         individual.first_name = first_name
@@ -400,12 +753,16 @@ class Command(BaseCommand):
         elif created and not individual.dob:
             # dob é obrigatório no modelo — usar data placeholder quando ausente no Excel
             individual.dob = date(1900, 1, 1)
-        if nib:
-            individual.nib = nib
         if location:
             individual.location = location
 
         json_ext = individual.json_ext or {}
+        if nib:
+            individual.nib = nib
+            # O envio BISTP lê primeiro json_ext — manter as cópias existentes alinhadas
+            for key in ('NIB', 'nib'):
+                if key in json_ext:
+                    json_ext[key] = nib
         if bi_str:
             json_ext['bilhete_didentidade'] = bi_str
         if pan:
@@ -418,7 +775,8 @@ class Command(BaseCommand):
             json_ext['categoria_eligibilidade'] = categoria
         if index_csu:
             json_ext['index_csu2026'] = index_csu
-        json_ext['agregado_id'] = agregado_id
+        # NIA nunca é alterado: num registo existente é igual (caso contrário seria conflito)
+        json_ext.setdefault('agregado_id', agregado_id)
         individual.json_ext = json_ext
 
         if not dry_run:
@@ -428,10 +786,9 @@ class Command(BaseCommand):
 
         return individual, created
 
-    def _get_or_create_group(self, *, agregado_id, location, username, dry_run):
+    def _create_or_update_group(self, *, group, agregado_id, location, username, dry_run):
         from individual.models import Group
 
-        group = Group.objects.filter(code=agregado_id, is_deleted=False).first()
         created = False
 
         if group is None:
@@ -451,11 +808,9 @@ class Command(BaseCommand):
     def _ensure_group_individual(self, *, group, individual, username, dry_run):
         from individual.models import GroupIndividual
 
-        existing = GroupIndividual.objects.filter(
+        if not group._state.adding and not individual._state.adding and GroupIndividual.objects.filter(
             group=group, individual=individual, is_deleted=False
-        ).first()
-
-        if existing:
+        ).exists():
             return False
 
         if not dry_run:
@@ -469,46 +824,57 @@ class Command(BaseCommand):
 
         return True
 
-    def _ensure_beneficiary(self, *, individual, benefit_plan, username):
+    def _ensure_beneficiary(self, *, individual, group, benefit_plan, username, dry_run):
         try:
-            from social_protection.models import Beneficiary, BeneficiaryStatus
+            from social_protection.models import Beneficiary, GroupBeneficiary, BeneficiaryStatus, BenefitPlan
         except ImportError:
             logger.warning("[import] social_protection não disponível — Fase 2 ignorada")
-            return False
+            return None
 
-        existing = Beneficiary.objects.filter(
-            individual=individual,
-            benefit_plan=benefit_plan,
-            is_deleted=False,
-        ).first()
+        if benefit_plan.type == BenefitPlan.BenefitPlanType.GROUP_TYPE:
+            model, target_field, target = GroupBeneficiary, 'group', group
+        else:
+            model, target_field, target = Beneficiary, 'individual', individual
+
+        existing = None
+        if not target._state.adding:
+            existing = model.objects.filter(
+                **{target_field: target},
+                benefit_plan=benefit_plan,
+                is_deleted=False,
+            ).first()
 
         if existing:
             if existing.status != BeneficiaryStatus.ACTIVE:
-                existing.status = BeneficiaryStatus.ACTIVE
-                existing.save(username=username)
-            return False
+                if not dry_run:
+                    existing.status = BeneficiaryStatus.ACTIVE
+                    existing.save(username=username)
+                return 'reactivated'
+            return None
 
-        benef = Beneficiary(
-            individual=individual,
-            benefit_plan=benefit_plan,
-            status=BeneficiaryStatus.ACTIVE,
-        )
-        benef.save(username=username)
-        return True
+        if not dry_run:
+            benef = model(
+                **{target_field: target},
+                benefit_plan=benefit_plan,
+                status=BeneficiaryStatus.ACTIVE,
+            )
+            benef.save(username=username)
+        return 'created'
 
     def _ensure_benefit_consumption(self, *, individual, payroll, agregado_id,
-                                     amount, benefit_type, username):
+                                    amount, benefit_type, username, dry_run):
         from payroll.models import BenefitConsumption, BenefitConsumptionStatus, PayrollBenefitConsumption
 
         # Verificar se já existe para este payroll e individual
-        existing = BenefitConsumption.objects.filter(
+        if not individual._state.adding and BenefitConsumption.objects.filter(
             individual=individual,
             payrollbenefitconsumption__payroll=payroll,
             is_deleted=False,
-        ).first()
-
-        if existing:
+        ).exists():
             return False
+
+        if dry_run:
+            return True
 
         today = date.today()
         code = f"{agregado_id}-{today.strftime('%Y%m')}"
@@ -530,7 +896,3 @@ class Command(BaseCommand):
         pbc.save(username=username)
 
         return True
-
-
-class _DryRunRollback(Exception):
-    pass
