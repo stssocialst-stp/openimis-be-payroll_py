@@ -106,8 +106,12 @@ class Command(BaseCommand):
         households = list(csu_file.households.values())
         exceptions = [h for h in households if csu2026.is_no_members_exception(h)]
         list_data = self._read_payment_list(options['lista'], corrections) if exceptions else {}
+        # Excepção que não se consegue montar fica em conflito no relatório; não pára os restantes
+        exception_problems = {}
         for household in exceptions:
-            self._build_exception_head(household, list_data)
+            problem = self._build_exception_head(household, list_data)
+            if problem:
+                exception_problems[household.index] = problem
 
         if options['index']:
             wanted = {str(i) for i in options['index']}
@@ -131,6 +135,9 @@ class Command(BaseCommand):
         )
 
         for position, household in enumerate(households, start=1):
+            if household.index in exception_problems:
+                report.conflict(household, exception_problems[household.index])
+                continue
             reason = csu2026.exclusion_reason(household)
             if reason:
                 report.excluded(household, reason)
@@ -303,7 +310,7 @@ class Command(BaseCommand):
             individual = plan.matches.get(member.key)
             created = individual is None
             individual = self._save_individual(household, member, individual, location, context, report)
-            report.member(created, member)
+            report.member(created, individual._csu_changed)
 
             gi = gi_by_individual.get(individual.id)
             if gi is None:
@@ -370,7 +377,8 @@ class Command(BaseCommand):
         }
         individual.json_ext = json_ext
 
-        if created or individual.is_dirty(check_relationship=True):
+        individual._csu_changed = created or individual.is_dirty(check_relationship=True)
+        if individual._csu_changed:
             individual.save(user=user)
 
         if dob_estimated:
@@ -431,12 +439,13 @@ class Command(BaseCommand):
         return data
 
     def _build_exception_head(self, household, list_data):
+        """Monta o chefe da excepção DPSSF a partir da lista; devolve o motivo se não for possível."""
         row = list_data.get(household.index)
         if row is None:
-            raise CommandError(f"Excepção INDEX {household.index}: não consta da lista de pagamento")
+            return "excepção DPSSF sem membros: agregado não consta da lista de pagamento"
         dob = csu2026.to_date(row.get('data_n'))
         if dob is None:
-            raise CommandError(f"Excepção INDEX {household.index}: data de nascimento em falta na lista")
+            return "excepção DPSSF sem membros: data de nascimento do titular em falta na lista de pagamento"
         name = household.respondent_name or csu2026.as_text(row.get('nome_chefe'))
         first_name, last_name = csu2026.split_name(name)
         household.members = [csu2026.Member(
@@ -511,8 +520,9 @@ class _Report:
     def household_done(self, household, plan):
         self._target()[0]['groups_created' if plan.group_created else 'groups_updated'] += 1
 
-    def member(self, created, member):
-        self._target()[0]['members_created' if created else 'members_updated'] += 1
+    def member(self, created, changed):
+        key = 'members_created' if created else ('members_updated' if changed else 'members_unchanged')
+        self._target()[0][key] += 1
 
     def kenon_only(self, count):
         self._target()[0]['kenon_only_members'] += count
@@ -548,6 +558,7 @@ class _Report:
             out.write(f"Agregados excluídos ({reason}) : {count}")
         out.write(f"Membros criados                : {self.counts['members_created']}")
         out.write(f"Membros actualizados           : {self.counts['members_updated']}")
+        out.write(f"Membros sem alterações         : {self.counts['members_unchanged']}")
         out.write(f"Membros só no Ké-Nón (mantidos): {self.counts['kenon_only_members']}")
         for kind, count in sorted(self.flag_counts.items()):
             out.write(f"Sinalizados — {kind:<17}: {count}")
