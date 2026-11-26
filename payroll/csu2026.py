@@ -109,9 +109,20 @@ def as_text(value):
     return str(value).strip()
 
 
+# Apelido de quem tem nome de uma só palavra (o openIMIS não aceita apelido vazio — decisão de 27/11/2026)
+MISSING_LAST_NAME = '-'
+
+
 def split_name(full_name):
     parts = (full_name or '').strip().split(' ', 1)
-    return parts[0], (parts[1].strip() if len(parts) > 1 else '')
+    last_name = parts[1].strip() if len(parts) > 1 else ''
+    return parts[0], (last_name or MISSING_LAST_NAME)
+
+
+def person_name_key(first_name, last_name):
+    """Nome de um Individual para comparação, sem o apelido provisório '-'."""
+    last_name = '' if (last_name or '').strip() == MISSING_LAST_NAME else last_name
+    return normalize_name(f"{first_name or ''} {last_name or ''}")
 
 
 def to_date(value):

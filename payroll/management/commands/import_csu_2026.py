@@ -234,7 +234,7 @@ class Command(BaseCommand):
             bi = csu2026.as_text(json_ext.get('bilhete_didentidade'))
             if bi:
                 by_bi[bi].append(individual)
-            by_name[normalize_name(f"{individual.first_name} {individual.last_name}")].append(individual)
+            by_name[csu2026.person_name_key(individual.first_name, individual.last_name)].append(individual)
 
         matches = {}
         used = set()
@@ -347,7 +347,8 @@ class Command(BaseCommand):
             individual.dob = member.dob
             dob_estimated = member.dob_estimated
         else:
-            dob_estimated = False
+            # Mantém-se a data registada; continua estimada se for a mesma estimativa (ex.: segunda passagem)
+            dob_estimated = individual.dob == member.dob
         individual.location = location
 
         json_ext = dict(individual.json_ext or {})
@@ -381,6 +382,9 @@ class Command(BaseCommand):
         if individual._csu_changed:
             individual.save(user=user)
 
+        if member.last_name == csu2026.MISSING_LAST_NAME:
+            report.flag(household, 'nome incompleto',
+                        f"{member.full_name}: nome de uma só palavra, apelido registado como '{csu2026.MISSING_LAST_NAME}'")
         if dob_estimated:
             report.flag(household, 'data estimada', f"{member.full_name}: {member.dob.isoformat()}", count_only=True)
         if member.bi:

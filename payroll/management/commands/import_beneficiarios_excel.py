@@ -599,7 +599,7 @@ class Command(BaseCommand):
         wanted = normalize_name(nome)
         by_name = [
             m for m in members
-            if normalize_name(f"{m.first_name} {m.last_name}") == wanted
+            if csu2026.person_name_key(m.first_name, m.last_name) == wanted
             and not (bi_str and stored_bi(m) and stored_bi(m) != bi_str)
         ]
         if len(by_name) == 1:

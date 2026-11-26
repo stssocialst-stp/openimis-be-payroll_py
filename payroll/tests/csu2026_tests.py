@@ -198,6 +198,9 @@ class Csu2026MappingTest(SimpleTestCase):
     def test_names(self):
         self.assertEqual(csu2026.normalize_name(' Maria  livramento Mendonça '), 'MARIA LIVRAMENTO MENDONCA')
         self.assertEqual(csu2026.split_name('Ana Maria Lima'), ('Ana', 'Maria Lima'))
+        self.assertEqual(csu2026.split_name('Ronaldo'), ('Ronaldo', '-'))
+        self.assertEqual(csu2026.person_name_key('Ronaldo', '-'), 'RONALDO')
+        self.assertEqual(csu2026.person_name_key('Ána', 'Maria  Lima'), 'ANA MARIA LIMA')
 
 
 class Csu2026MemberMatchingTest(SimpleTestCase):
